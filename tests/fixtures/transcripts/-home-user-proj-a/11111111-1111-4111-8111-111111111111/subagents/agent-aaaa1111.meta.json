@@ -1,0 +1,7 @@
+{
+  "agentType": "researcher",
+  "description": "Research auth",
+  "toolUseId": "toolu_task_a1",
+  "spawnDepth": 1,
+  "worktreePath": ""
+}

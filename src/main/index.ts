@@ -1,19 +1,12 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 import { IPC, type AppInfo } from '@shared/ipc';
-import type { StationSnapshot } from '@shared/types';
 import { installNetGuard } from './netGuard';
+import { Station } from './station';
 
 const isDemo = process.argv.includes('--demo');
 let mainWindow: BrowserWindow | null = null;
-
-const emptySnapshot = (): StationSnapshot => ({
-  projects: {},
-  sessions: {},
-  agents: {},
-  log: [],
-  eventsReceived: 0,
-});
+let station: Station | null = null;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -63,7 +56,16 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(() => {
     installNetGuard(session.defaultSession);
 
-    ipcMain.handle(IPC.getSnapshot, () => emptySnapshot());
+    station = new Station({
+      version: app.getVersion(),
+      offline: isDemo,
+      onSnapshot: (snap) => mainWindow?.webContents.send(IPC.snapshot, snap),
+    });
+    station.start().catch(() => {
+      // Ingest unavailable (e.g. no free port): the app still opens; status shows 0 events.
+    });
+
+    ipcMain.handle(IPC.getSnapshot, () => station?.snapshot());
     ipcMain.handle(IPC.appInfo, (): AppInfo => ({
       name: 'WSC',
       version: app.getVersion(),
@@ -74,6 +76,14 @@ if (!app.requestSingleInstanceLock()) {
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+  });
+
+  let stopping = false;
+  app.on('before-quit', (e) => {
+    if (stopping || !station) return;
+    stopping = true;
+    e.preventDefault();
+    void station.stop().finally(() => app.quit());
   });
 
   app.on('window-all-closed', () => {

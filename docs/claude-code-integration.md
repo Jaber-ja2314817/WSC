@@ -124,6 +124,8 @@ Other notification types, such as `auth_success` and the `quota_*` types, are ig
 
 Decision: use **`type: "command"`** with **`"async": true`**, running `node "${CLAUDE_PLUGIN_ROOT}/hooks/forward.mjs"`.
 
+**Exception, verified live:** `Stop` and `SessionEnd` are **synchronous**, with `timeout: 2`. In headless runs (`claude -p`), the process exits before async hooks for the final turn get to run, so the last `Stop` and the `SessionEnd` never arrived. Run synchronously, they arrive reliably. The cost is one Node start per turn end: about 20 ms measured with the app closed, because the forwarder exits as soon as it finds no runtime file. `tests/hooksConfig.test.ts` pins this split.
+
 - **async** [docs]: the hook runs in the background, so Claude Code never waits on it. This is the strongest "never slow Claude Code down" guarantee.
 - **Why not `type: "http"`?** HTTP hooks exist [docs], but their `url` is static config. Our port can fall back from 47821 to a free port, and the token changes on every launch; both live in the runtime file. HTTP headers can only interpolate environment variables named in `allowedEnvVars`, so they cannot read a file.
 - **Forwarder contract**, regardless of async:
@@ -210,10 +212,20 @@ Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-p
 - Never throw.
 - Read only the fields needed for state; never retain message text.
 
-## 8. Open questions (to verify live)
+## 8. Verified live (Claude Code 2.1.294, 2026-10-08)
 
-1. Inside a subagent, is a hook's `session_id` the **parent's** session id? The docs don't say. We assume yes; `transcript_path` should point at the parent transcript.
-2. `SubagentStart` carries **no transcript path**. We derive it as `<dir of transcript_path>/<sessionId>/subagents/agent-<agent_id>.jsonl`.
-3. Is `agent_id` in hooks the same string as the transcript's `agentId` and file name? Watch for an `agent-` prefix difference: the docs example shows `agent-abc123` in SubagentStart but `def456` in SubagentStop. The normalizer strips a leading `agent-`.
-4. Do nested subagents (`spawnDepth` > 1) report a parent agent id? For now their parent is set to `orchestrator`.
-5. Field drift between versions. Re-verify this file on each Claude Code minor upgrade and note the version at the top.
+Setup: two headless `claude -p --plugin-dir ./plugin` sessions ran at the same time in two temp folders. Each spawned one `general-purpose` subagent that ran `Read` and `Bash(ls)`.
+
+1. **Subagent `session_id` is the parent's.** Every event from inside a subagent carried the parent session id and parent `transcript_path`.
+2. **`agent_id` has no `agent-` prefix**, e.g. `a72ab8f117ab00edb`. That is the same string as the transcript `agentId` and the `agent-<id>.jsonl` file name. The prefix-stripping stays as a safety net.
+3. **Subagents run in the background.** The orchestrator's `PostToolUse` for `Agent` fires about 10 ms after `SubagentStart`, and its `Stop` can fire while the subagent is still working. A subagent is finished only on `SubagentStop`, never on the `Agent` tool's end.
+4. **The hand-back is a tool.** Subagents end by calling a `SubagentHandback` tool (mapped to `delegate`). A `UserPromptSubmit` with no user typing then fires on the orchestrator as the result is delivered.
+5. **`PostToolBatch` also fires inside subagents**, with `agent_id`. It is ignored for now.
+6. **Project attribution:** the two folders produced two projects, and all 34 events landed in the right one.
+7. **Backfill:** transcripts never record a session end. An orchestrator `assistant` record with `stop_reason: "end_turn"` is mapped to `idle`, so closed sessions don't stay "thinking".
+
+## 9. Open questions
+
+1. Do nested subagents (`spawnDepth` > 1) report a parent agent id? For now their parent is `orchestrator`.
+2. `PermissionRequest` and `Notification` were not exercised by the headless run, since `-p` mode never prompts. They need an interactive check.
+3. Field drift between versions. Re-verify this file on each Claude Code minor upgrade and note the version at the top.

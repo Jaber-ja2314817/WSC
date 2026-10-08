@@ -1,0 +1,1 @@
+{"type": "assistant", "uuid": "u-assistant-1-main", "timestamp": "2026-01-01T10:01:00.000Z", "sessionId": "33333333-3333-4333-8333-333333333333", "cwd": "/home/user/proj-old", "isSidechain": false, "version": "2.1.294", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_ls_o1", "name": "Glob", "input": {"pattern": "**/*.ts"}}]}}

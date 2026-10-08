@@ -1,0 +1,14 @@
+{
+  "name": "wsc",
+  "description": "WSC (Work Space Claude) plugin marketplace",
+  "owner": {
+    "name": "WSC contributors"
+  },
+  "plugins": [
+    {
+      "name": "wsc",
+      "source": "./plugin",
+      "description": "Watch Claude Code agents work as a live 2D pixel-art crew (hooks + /station)."
+    }
+  ]
+}
