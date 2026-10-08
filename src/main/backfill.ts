@@ -91,17 +91,23 @@ const byTs = (a: StationEvent, b: StationEvent): number => a.ts - b.ts;
 export async function backfillTranscript(
   transcriptPath: string,
   opts: BackfillOptions,
+  cutoff?: number,
 ): Promise<BackfillResult> {
   try {
-    return await backfillSession(transcriptPath, opts);
+    return await backfillSession(transcriptPath, opts, cutoff);
   } catch {
     return { sessions: 0, agents: 0 };
   }
 }
 
+/** A subagent silent this long is over, even if its last call never got an answer. */
+const LONG_QUIET_MS = 10 * 60_000;
+
 async function backfillSession(
   transcriptPath: string,
   opts: BackfillOptions,
+  /** Skip the session if its newest record is older than this (file mtimes can lie). */
+  cutoff?: number,
 ): Promise<BackfillResult> {
   const now = opts.now ?? Date.now();
   const maxBytes = opts.maxBytesPerFile ?? DEFAULT_MAX_BYTES;
@@ -198,6 +204,11 @@ async function backfillSession(
     }
   }
 
+  // Only record-derived events count: session_start/agent_spawn/agent_finish may carry mtimes.
+  const SYNTHETIC = new Set(['session_start', 'agent_spawn', 'agent_finish']);
+  if (cutoff !== undefined && !events.some((e) => e.ts >= cutoff && !SYNTHETIC.has(e.kind))) {
+    return { sessions: 0, agents: 0 };
+  }
   opts.onEvents(events.sort(byTs));
   return { sessions: 1, agents };
 }
@@ -215,6 +226,11 @@ function isFinished(
   now: number,
   grace: number,
 ): boolean {
+  // Subagents end by calling the hand-back tool (verified live, Claude Code 2.1.294).
+  if (subEvents.some((e) => e.kind === 'tool_start' && e.tool?.name === 'SubagentHandback')) {
+    return true;
+  }
+  if (now - mtime >= LONG_QUIET_MS) return true;
   const spawnUseId = metaToolUseId(meta);
   if (!spawnUseId || !answeredInParent.has(spawnUseId)) return false;
   if (now - mtime < grace) return false;
@@ -237,7 +253,7 @@ export async function backfillRecent(opts: BackfillRecentOptions): Promise<Backf
         if (!file.endsWith('.jsonl')) continue;
         const path = join(dir, file);
         if (!(await isRecent(path, cutoff))) continue;
-        const r = await backfillTranscript(path, { ...opts, now });
+        const r = await backfillTranscript(path, { ...opts, now }, cutoff);
         total.sessions += r.sessions;
         total.agents += r.agents;
       }

@@ -17,6 +17,8 @@ export interface StationStoreOptions {
   logCap?: number;
   /** Working/thinking agents with no events for this long become 'stale'. */
   staleMs?: number;
+  /** Stale subagents with no events for this long are treated as finished (lost signal). */
+  lostMs?: number;
   /** Ended sessions (and their agents) are removed after this long. */
   sessionLingerMs?: number;
   /** Max remembered event ids for dedupe. */
@@ -38,6 +40,7 @@ const ENDED_USE_IDS_CAP = 64;
 export class StationStore {
   private readonly logCap: number;
   private readonly staleMs: number;
+  private readonly lostMs: number;
   private readonly sessionLingerMs: number;
   private readonly dedupeCap: number;
 
@@ -56,6 +59,7 @@ export class StationStore {
   constructor(opts: StationStoreOptions = {}) {
     this.logCap = opts.logCap ?? 2000;
     this.staleMs = opts.staleMs ?? 90_000;
+    this.lostMs = opts.lostMs ?? 15 * 60_000;
     this.sessionLingerMs = opts.sessionLingerMs ?? 10_000;
     this.dedupeCap = opts.dedupeCap ?? 20_000;
   }
@@ -81,6 +85,19 @@ export class StationStore {
         now - agent.lastEventAt > this.staleMs
       ) {
         agent.status = 'stale';
+        agent.stepStartedAt = now;
+        changed = true;
+      }
+      // A subagent silent this long is gone (e.g. its session closed before we saw it end):
+      // free its crew sprite instead of leaving it at a desk forever.
+      if (
+        !agent.isOrchestrator &&
+        agent.status === 'stale' &&
+        now - agent.lastEventAt > this.lostMs
+      ) {
+        agent.status = 'done';
+        agent.finishedAt = now;
+        agent.currentTool = undefined;
         agent.stepStartedAt = now;
         changed = true;
       }
@@ -166,6 +183,11 @@ export class StationStore {
     }
 
     this.remember(id);
+    // A session stays in the zone it started in, even after `cd` changes its cwd.
+    const known = this.sessions.get(sessionId);
+    if (known && known.projectId !== ev.projectId && this.projects.has(known.projectId)) {
+      ev.projectId = known.projectId;
+    }
     const project = this.ensureProject(ev);
     const session = this.ensureSession(ev, project);
     const agent = this.ensureAgent(ev, session);
@@ -441,8 +463,13 @@ export function logText(ev: StationEvent): string {
     case 'agent_error':
       return 'error';
     case 'tool_start':
+      if (tool?.category === 'delegate')
+        return `delegating → ${tool.summary ?? ev.label ?? 'agent'}`;
       return tool ? withSummary(tool.name) : 'tool';
     case 'tool_end':
+      // Subagents run in the background: the delegate call returning means "handed off", not done.
+      if (tool?.category === 'delegate')
+        return tool.ok === false ? 'delegation failed' : 'handed off';
       return tool ? `${tool.name} ${tool.ok === false ? 'failed' : 'done'}` : 'tool done';
     case 'waiting_for_user':
       return tool ? `waiting for you · ${tool.name}` : 'waiting for you';

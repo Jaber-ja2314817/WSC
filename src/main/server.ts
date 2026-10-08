@@ -10,6 +10,29 @@ export interface IngestServerOptions {
   version?: string;
   host?: '127.0.0.1';
   onPayload: (raw: unknown, receivedAt: number) => void;
+  /** `POST /v1/command` from the /station launcher. The result is sent back as JSON. */
+  onCommand?: (cmd: StationCommand) => unknown;
+}
+
+export const COMMAND_ACTIONS = ['focus', 'compact', 'theme', 'demo', 'status'] as const;
+export type CommandAction = (typeof COMMAND_ACTIONS)[number];
+
+export interface StationCommand {
+  action: CommandAction;
+  arg?: string;
+}
+
+/** Validates a raw command body; returns null for anything unexpected. */
+export function parseCommand(raw: unknown): StationCommand | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const action = o['action'];
+  if (typeof action !== 'string' || !(COMMAND_ACTIONS as readonly string[]).includes(action)) {
+    return null;
+  }
+  const arg = o['arg'];
+  if (arg !== undefined && (typeof arg !== 'string' || arg.length > 64)) return null;
+  return { action: action as CommandAction, ...(arg ? { arg } : {}) };
 }
 
 export interface IngestServer {
@@ -19,6 +42,9 @@ export interface IngestServer {
 }
 
 const DEFAULT_MAX_BYTES = 256 * 1024;
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
 function tokenMatches(given: string | string[] | undefined, expected: string): boolean {
   if (typeof given !== 'string') return false;
@@ -83,8 +109,37 @@ export async function startIngestServer(opts: IngestServerOptions): Promise<Inge
     if (req.method === 'GET' && url === '/v1/health') {
       return send(res, 200, { ok: true, app: 'wsc', version: opts.version ?? '', received });
     }
-    if (req.method !== 'POST' || url !== '/v1/events') return reject(res, 404, req);
+    const isEvents = url === '/v1/events';
+    const isCommand = url === '/v1/command' && opts.onCommand !== undefined;
+    if (req.method !== 'POST' || (!isEvents && !isCommand)) return reject(res, 404, req);
 
+    readJson(req, res, (payload) => {
+      if (isCommand) {
+        const cmd = parseCommand(payload);
+        if (!cmd) return reject(res, 400);
+        void Promise.resolve()
+          .then(() => opts.onCommand?.(cmd))
+          .then(
+            (result) => send(res, 200, { ok: true, ...(isObject(result) ? result : {}) }),
+            () => send(res, 500, { ok: false }),
+          );
+        return;
+      }
+      received++;
+      send(res, 204);
+      try {
+        opts.onPayload(payload, Date.now());
+      } catch {
+        // Never let a consumer bug take down the server.
+      }
+    });
+  };
+
+  const readJson = (
+    req: IncomingMessage,
+    res: ServerResponse,
+    onJson: (payload: unknown) => void,
+  ): void => {
     const declared = Number(req.headers['content-length'] ?? 0);
     if (declared > maxBytes) {
       rejected++;
@@ -119,13 +174,7 @@ export async function startIngestServer(opts: IngestServerOptions): Promise<Inge
       } catch {
         return reject(res, 400);
       }
-      received++;
-      send(res, 204);
-      try {
-        opts.onPayload(payload, Date.now());
-      } catch {
-        // Never let a consumer bug take down the server.
-      }
+      onJson(payload);
     });
   };
 

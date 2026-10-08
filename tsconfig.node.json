@@ -8,7 +8,11 @@
     "src/shared/**/*",
     "tests/**/*",
     "scripts/**/*.ts",
-    "playwright.config.ts"
+    "playwright.config.ts",
+    "src/renderer/director/**/*",
+    "src/renderer/themes/pixelBuffer.ts",
+    "src/renderer/themes/crew.ts",
+    "src/renderer/themes/generators/**/*"
   ],
   "compilerOptions": {
     "composite": true,

@@ -222,7 +222,14 @@ Setup: two headless `claude -p --plugin-dir ./plugin` sessions ran at the same t
 4. **The hand-back is a tool.** Subagents end by calling a `SubagentHandback` tool (mapped to `delegate`). A `UserPromptSubmit` with no user typing then fires on the orchestrator as the result is delivered.
 5. **`PostToolBatch` also fires inside subagents**, with `agent_id`. It is ignored for now.
 6. **Project attribution:** the two folders produced two projects, and all 34 events landed in the right one.
-7. **Backfill:** transcripts never record a session end. An orchestrator `assistant` record with `stop_reason: "end_turn"` is mapped to `idle`, so closed sessions don't stay "thinking".
+7. **`/station` resolves without the namespace.** With the plugin loaded, both `/station status` and `/wsc:station status` ran the skill and printed the launcher's one line. Bare `/station` stops working only if another skill named `station` exists.
+8. **Backfill quirks seen on real data:**
+   - Transcript file mtimes can be recent while every record is months old, so recency is judged by record timestamps.
+   - Finished subagents always end with a `SubagentHandback` call.
+   - A subagent silent for 10 minutes or more is treated as finished.
+   - In the store, an agent stale for 15 minutes or more is marked done ("lost signal"), so it never occupies a desk forever.
+   - A session that `cd`s keeps its original zone; later events carry the new `cwd`, and the store pins them to the session's first project.
+9. **Backfill:** transcripts never record a session end. An orchestrator `assistant` record with `stop_reason: "end_turn"` is mapped to `idle`, so closed sessions don't stay "thinking".
 
 ## 9. Open questions
 

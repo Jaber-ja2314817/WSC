@@ -7,7 +7,8 @@ import { projectIdFor } from '../src/shared/projects';
 import type { StationEvent } from '../src/shared/types';
 
 const FIXTURES = join(import.meta.dirname, 'fixtures', 'transcripts');
-const NOW = Date.parse('2026-01-01T12:00:00.000Z');
+// Just after the fixture records (10:00–10:09), like a real recently active session.
+const NOW = Date.parse('2026-01-01T10:15:00.000Z');
 const MIN = 60 * 1000;
 const SA = '11111111-1111-4111-8111-111111111111';
 const SB = '22222222-2222-4222-8222-222222222222';
@@ -182,5 +183,27 @@ describe('claudeProjectsDir', () => {
     delete process.env['CLAUDE_CONFIG_DIR'];
     expect(claudeProjectsDir().endsWith(join('.claude', 'projects'))).toBe(true);
     if (prev !== undefined) process.env['CLAUDE_CONFIG_DIR'] = prev;
+  });
+});
+
+describe('backfill against real-world quirks', () => {
+  it('skips a session whose file was touched recently but whose records are old', async () => {
+    const events: StationEvent[] = [];
+    // Records in the fixture are from ~11:50; pretend "now" is a day later with fresh mtimes.
+    const later = NOW + 24 * 60 * MIN;
+    await touchAll(root, later - MIN);
+    const result = await backfillRecent({
+      projectsDir: root,
+      now: later,
+      onEvents: (e) => events.push(...e),
+    });
+    expect(result.sessions).toBe(0);
+    expect(events).toEqual([]);
+  });
+
+  it('finishes a subagent that has been silent for over 10 minutes', async () => {
+    await touch(subFile('bbbb2222'), NOW - 11 * MIN);
+    const { events } = await collect();
+    expect(events.some((e) => e.id.endsWith(':agent:bbbb2222:finish'))).toBe(true);
   });
 });

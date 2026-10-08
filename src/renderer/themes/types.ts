@@ -39,7 +39,7 @@ export interface ThemeRuntime {
   floor(kind: FloorKind, x: number, y: number): Texture;
   wall(): Texture;
   /** Core props always exist; decor props may return null (skipped). */
-  prop(name: CoreProp | string): Texture | null;
+  prop(name: CoreProp | (string & {})): Texture | null;
   /** Station gear shown at a desk while working in a category. */
   gear(category: ToolCategory): Texture;
   /** Optional animated backdrop (e.g. starfield). Called once per scene build. */

@@ -135,3 +135,74 @@ describe('ingest server', () => {
     }
   });
 });
+
+describe('ingest server /v1/command', () => {
+  let commands: unknown[] = [];
+
+  async function startWithCommands(): Promise<IngestServer> {
+    commands = [];
+    server = await startIngestServer({
+      port: 0,
+      token: TOKEN,
+      version: '0.1.0',
+      onPayload: () => {},
+      onCommand: (cmd) => {
+        commands.push(cmd);
+        return cmd.action === 'status' ? { running: true, port: 1234 } : undefined;
+      },
+    });
+    return server;
+  }
+
+  const post = (s: IngestServer, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(url(s, '/v1/command'), {
+      method: 'POST',
+      headers: { 'x-wsc-token': TOKEN, 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+
+  it('dispatches a valid command and returns its result', async () => {
+    const s = await startWithCommands();
+    const res = await post(s, { action: 'theme', arg: 'office' });
+    expect(res.status).toBe(200);
+    expect(commands).toEqual([{ action: 'theme', arg: 'office' }]);
+    const status = await post(s, { action: 'status' });
+    expect(await status.json()).toEqual({ ok: true, running: true, port: 1234 });
+  });
+
+  it('does not count commands as received events', async () => {
+    const s = await startWithCommands();
+    await post(s, { action: 'focus' });
+    expect(s.stats().received).toBe(0);
+  });
+
+  it('requires the token', async () => {
+    const s = await startWithCommands();
+    const res = await post(s, { action: 'focus' }, { 'x-wsc-token': 'nope' });
+    expect(res.status).toBe(401);
+    expect(commands).toEqual([]);
+  });
+
+  it('rejects browser origins', async () => {
+    const s = await startWithCommands();
+    const res = await post(s, { action: 'focus' }, { origin: 'https://example.com' });
+    expect(res.status).toBe(403);
+    expect(commands).toEqual([]);
+  });
+
+  it.each([{}, { action: 'rm -rf' }, { action: 'theme', arg: 5 }, [], 'focus'])(
+    'rejects malformed command %j',
+    async (body) => {
+      const s = await startWithCommands();
+      const res = await post(s, body);
+      expect(res.status).toBe(400);
+      expect(commands).toEqual([]);
+    },
+  );
+
+  it('is a 404 when no command handler is configured', async () => {
+    const s = await start();
+    const res = await post(s, { action: 'focus' });
+    expect(res.status).toBe(404);
+  });
+});

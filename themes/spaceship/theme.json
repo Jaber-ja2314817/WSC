@@ -1,0 +1,103 @@
+{
+  "id": "spaceship",
+  "name": "Spaceship",
+  "author": "WSC contributors",
+  "license": "MIT",
+  "version": "1.0.0",
+  "description": "A pixel-art starship: the bridge holds the command table, the crew lounge sits beside it, and every project is a ship section.",
+  "palette": {
+    "background": "#070b1a",
+    "panel": "#111833",
+    "text": "#e6ecff",
+    "accent": "#4fd8ff",
+    "working": "#4fd88a",
+    "waiting": "#ffcc4d",
+    "done": "#7aa2ff",
+    "error": "#ff5a6a",
+    "stale": "#7b8299"
+  },
+  "tileSize": 16,
+  "pixelScale": 3,
+  "roomNames": {
+    "center": "Bridge",
+    "lounge": "Crew Lounge",
+    "zone": "Section"
+  },
+  "art": {
+    "kind": "generated",
+    "generator": "spaceship"
+  },
+  "decor": {
+    "center": ["console", "lamp"],
+    "lounge": ["sofa", "coffee_machine", "plant", "rug"],
+    "zone": ["plant", "bookshelf", "crate", "console"]
+  },
+  "ambient": {
+    "starfield": true,
+    "twinkle": true
+  },
+  "phrases": {
+    "assigned": [
+      "Aye, captain!",
+      "Orders received.",
+      "On my way.",
+      "Course plotted.",
+      "Reporting for duty!",
+      "Consider it done."
+    ],
+    "heading_out": [
+      "Heading to my station.",
+      "Engaging!",
+      "Full impulse!",
+      "Off to the section.",
+      "Thrusters on!",
+      "Warming up the console."
+    ],
+    "done": [
+      "Mission complete, captain!",
+      "Task secured.",
+      "All systems green.",
+      "Objective achieved!",
+      "Report filed, captain.",
+      "Smooth sailing."
+    ],
+    "error": [
+      "Hull breach… er, test failure.",
+      "Red alert! Something broke.",
+      "Hmm… that broke.",
+      "Systems failing, captain.",
+      "We hit an asteroid.",
+      "Damage report incoming."
+    ],
+    "waiting": [
+      "Awaiting your orders.",
+      "Need your call, captain.",
+      "Permission to proceed?",
+      "Standing by for input.",
+      "Captain on deck, please!"
+    ],
+    "lounge": [
+      "Back to the mess hall.",
+      "Coffee break.",
+      "Off duty!",
+      "Time for a space snack.",
+      "Shift's over.",
+      "Stargazing time."
+    ],
+    "delegating": [
+      "You — take this one.",
+      "Crew member, report!",
+      "New orders for you.",
+      "Assigning a specialist.",
+      "Dispatching the crew.",
+      "Ensign, you're up."
+    ],
+    "arrive": [
+      "Beamed aboard!",
+      "Reinforcements here.",
+      "Fresh crew reporting!",
+      "Docking complete.",
+      "New hand on deck!"
+    ]
+  }
+}

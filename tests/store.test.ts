@@ -450,3 +450,34 @@ describe('StationStore', () => {
     expect(s2.log).toHaveLength(1);
   });
 });
+
+describe('lost signal', () => {
+  it('finishes a stale subagent after lostMs, but never the orchestrator', () => {
+    const store = new StationStore({ staleMs: 1_000, lostMs: 5_000 });
+    store.applyMany([
+      ev({ kind: 'session_start', ts: 0 }),
+      ev({ kind: 'agent_spawn', agentId: 'sub1', ts: 1, label: 'helper' }),
+      ev({ kind: 'user_prompt', ts: 2 }),
+    ]);
+    store.tick(2_000);
+    let snap = store.snapshot();
+    expect(Object.values(snap.agents).map((a) => a.status)).toEqual(['stale', 'stale']);
+    store.tick(10_000);
+    snap = store.snapshot();
+    const byId = Object.fromEntries(Object.values(snap.agents).map((a) => [a.id, a.status]));
+    expect(byId).toEqual({ orchestrator: 'stale', sub1: 'done' });
+  });
+});
+
+describe('cwd changes', () => {
+  it('keeps a session in its original project when later events carry another cwd', () => {
+    const store = new StationStore();
+    store.applyMany([
+      ev({ kind: 'session_start', ts: 0, projectId: 'p-a', projectName: 'a' }),
+      ev({ kind: 'user_prompt', ts: 1, projectId: 'p-sub', projectName: 'sub' }),
+    ]);
+    const snap = store.snapshot();
+    expect(Object.keys(snap.projects)).toEqual(['p-a']);
+    expect(Object.values(snap.agents).every((a) => a.projectId === 'p-a')).toBe(true);
+  });
+});
