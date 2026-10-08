@@ -26,6 +26,7 @@ export interface BackfillOptions {
   maxBytesPerFile?: number;
   finishGraceMs?: number;
   toolOverrides?: Record<string, ToolCategory>;
+  fullToolDetails?: boolean;
   onEvents: (evs: StationEvent[]) => void;
 }
 
@@ -132,6 +133,7 @@ async function backfillSession(
     cwd,
     toolNames: new Map(),
     ...(opts.toolOverrides ? { toolOverrides: opts.toolOverrides } : {}),
+    ...(opts.fullToolDetails ? { fullToolDetails: true } : {}),
   };
   for (const line of lines) {
     for (const ev of normalizeTranscriptLine(line, ctx)) {
@@ -180,6 +182,7 @@ async function backfillSession(
       cwd: firstCwd(subLines) ?? cwd,
       toolNames: new Map(),
       ...(opts.toolOverrides ? { toolOverrides: opts.toolOverrides } : {}),
+      ...(opts.fullToolDetails ? { fullToolDetails: true } : {}),
     };
     const subEvents = subLines.flatMap((l) => normalizeTranscriptLine(l, subCtx));
     const spawnTs = subEvents.length > 0 ? Math.min(...subEvents.map((e) => e.ts)) : mtime;

@@ -15,6 +15,8 @@ export interface TranscriptContext {
   cwd?: string;
   label?: string;
   toolOverrides?: Record<string, ToolCategory>;
+  /** Longer summaries (still redacted). Off by default. */
+  fullToolDetails?: boolean;
   /** tool_use id → tool name, filled on tool_use so tool_end can name the tool. */
   toolNames?: Map<string, string>;
 }
@@ -103,7 +105,12 @@ function parseLine(line: string, ctx: TranscriptContext): StationEvent[] {
         ...base,
         id: `${sessionId}:tool:${useId}:start`,
         kind: 'tool_start',
-        tool: { name, category, summary: summarizeTool(name, input), useId },
+        tool: {
+          name,
+          category,
+          summary: summarizeTool(name, input, { full: ctx.fullToolDetails === true }),
+          useId,
+        },
       };
       if (isDelegate && isRec(input)) {
         const label = str(input['subagent_type']) ?? str(input['description']);

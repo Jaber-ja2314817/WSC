@@ -14,6 +14,9 @@ const PATTERNS: Array<[RegExp, string]> = [
     /\b([A-Za-z0-9_-]*(?:password|passwd|pwd|secret|token|api[_-]?key)[A-Za-z0-9_-]*\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s&;]+)/gi,
     `$1${MASK}`,
   ],
+  // Credential flags: curl -u user:pass / --user user:pass, --password value, --token value
+  [/(\s(?:-u|--user)\s+)[^\s:]+:\S+/g, `$1${MASK}`],
+  [/(--?(?:password|passwd|pass|token|secret|api-?key)\s+)(?!-)\S+/gi, `$1${MASK}`],
   // Well-known token shapes
   [/\bsk-[A-Za-z0-9_-]{8,}/g, MASK],
   [/\bgh[pousr]_[A-Za-z0-9]{8,}/g, MASK],

@@ -1,0 +1,64 @@
+name: Bug report
+description: Something on the station is wrong or broken.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please **don't paste real transcripts, tokens or private code**. Describe what you saw instead. Security issues go to the private advisory form (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect to see?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run /station
+        2. Start two subagents in project X
+        3. …
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options: [macOS (Apple silicon), macOS (Intel), Windows, Linux, Other]
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: macOS 15.3 / Windows 11 23H2 / Ubuntu 24.04
+  - type: input
+    id: app-version
+    attributes:
+      label: WSC app version
+      description: Shown by `/station status` or in the side panel.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+      placeholder: 2.1.294
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How are hooks installed?
+      options:
+        [Plugin (/plugin install wsc@wsc), Manual hooks in settings.json, Running from source]
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots / extra context
+      description: Demo-mode screenshots are ideal if your real session contains private info.

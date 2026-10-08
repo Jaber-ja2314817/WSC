@@ -4,7 +4,7 @@ import type { Container } from 'pixi.js';
 
 export const ZOOM_LEVELS = [0.25, 0.5, 1, 2, 3, 4, 5, 6] as const;
 
-interface View {
+export interface View {
   x: number;
   y: number;
   zoom: number;
@@ -63,6 +63,20 @@ export class Camera {
   /** Screen px → world px. */
   toWorld(sx: number, sy: number): { x: number; y: number } {
     return { x: (sx - this.view.x) / this.view.zoom, y: (sy - this.view.y) / this.view.zoom };
+  }
+
+  /** Current resting view (for persistence). */
+  getView(): View {
+    return { ...(this.target ?? this.view) };
+  }
+
+  /** Jump to a saved view (clamped to the current world). */
+  setView(v: View): void {
+    const next = { x: Math.round(v.x), y: Math.round(v.y), zoom: nearestLevel(v.zoom) };
+    this.clamp(next);
+    this.view = next;
+    this.target = null;
+    this.apply();
   }
 
   fitAll(animate = true): void {

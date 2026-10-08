@@ -1,0 +1,77 @@
+{
+  "id": "terminal",
+  "name": "Terminal",
+  "author": "WSC contributors",
+  "license": "MIT",
+  "version": "1.0.0",
+  "description": "A minimal phosphor-green station drawn as ASCII-style glyphs: high contrast, no backdrop, minimal motion. The best pick for accessibility and low-resource machines.",
+  "palette": {
+    "background": "#020a05",
+    "panel": "#06150b",
+    "text": "#b8ffc8",
+    "accent": "#4dff88",
+    "working": "#2fd65f",
+    "waiting": "#ffe14d",
+    "done": "#7ea6e8",
+    "error": "#e02828",
+    "stale": "#3d4d43"
+  },
+  "tileSize": 16,
+  "pixelScale": 3,
+  "roomNames": {
+    "center": "core",
+    "lounge": "idle_pool",
+    "zone": "proc"
+  },
+  "fontFamily": "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+  "art": {
+    "kind": "generated",
+    "generator": "terminal"
+  },
+  "decor": {
+    "center": ["console", "lamp"],
+    "lounge": ["sofa", "coffee_machine", "plant"],
+    "zone": ["plant", "bookshelf", "crate", "console"]
+  },
+  "ambient": {
+    "starfield": false,
+    "twinkle": false
+  },
+  "phrases": {
+    "assigned": ["$ on it", "ack", "fork() ok", "pid assigned", "job queued", "accepted"],
+    "heading_out": [
+      "cd ../proc",
+      "exec ok",
+      "spawning…",
+      "nohup &",
+      "attaching tty",
+      "mounting /work"
+    ],
+    "done": ["exit 0", "done.", "ok: all green", "task complete", "return 0", "[ OK ]"],
+    "error": [
+      "segfault… retrying?",
+      "exit 1",
+      "core dumped",
+      "E: something broke",
+      "panic: unexpected",
+      "[FAIL]"
+    ],
+    "waiting": [
+      "SIGPAUSE: awaiting input",
+      "read -p 'continue?'",
+      "[y/N]?",
+      "blocked on stdin",
+      "sudo: need your ok"
+    ],
+    "lounge": ["sleep 60", "idle.", "nice -n 19", "back to pool", "^Z", "zzz…"],
+    "delegating": [
+      "fork && exec",
+      "spawn worker",
+      "xargs -P",
+      "dispatching job",
+      "bg %1 && wait",
+      "you: run this"
+    ],
+    "arrive": ["new pid", "worker online", "tty attached", "booted.", "hello, world"]
+  }
+}

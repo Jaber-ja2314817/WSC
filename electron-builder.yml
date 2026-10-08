@@ -1,0 +1,56 @@
+# Packaging for WSC. Builds are unsigned for now; see .github/workflows/release.yml for where
+# signing/notarization secrets plug in later.
+appId: io.github.owner.wsc
+productName: WSC
+copyright: Copyright © 2026 WSC contributors
+directories:
+  # build/icon.png (≥ 512×512) is picked up automatically when present.
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - resources/**
+  - package.json
+  # Vite bundles every dependency into out/; main/preload import only node:* and electron.
+  # If you add a runtime dependency to main, bundle it or remove this line.
+  - '!node_modules/**'
+# Ship the Claude Code plugin inside the app so the manual hook install can point at it.
+extraResources:
+  - from: plugin
+    to: plugin
+    filter: ['**/*']
+asarUnpack:
+  - resources/**
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  category: public.app-category.developer-tools
+  identity: null
+  notarize: false
+  hardenedRuntime: false
+dmg:
+  writeUpdateInfo: false
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  differentialPackage: false
+
+linux:
+  target: [AppImage]
+  category: Development
+  synopsis: Watch Claude Code agents work on a pixel-art station
+
+publish:
+  provider: github
+  owner: OWNER
+  repo: wsc
+  releaseType: draft

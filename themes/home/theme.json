@@ -1,0 +1,99 @@
+{
+  "id": "home",
+  "name": "Home",
+  "author": "WSC contributors",
+  "license": "MIT",
+  "version": "1.0.0",
+  "description": "A cozy pixel house: orchestrators gather at the kitchen table, idle crew lounge in the living room, and every project gets its own room.",
+  "palette": {
+    "background": "#2a2118",
+    "panel": "#3a2d22",
+    "text": "#fbf3e2",
+    "accent": "#efc266",
+    "working": "#7fc66b",
+    "waiting": "#f0a64b",
+    "done": "#8fb8e8",
+    "error": "#e0675c",
+    "stale": "#a39582"
+  },
+  "tileSize": 16,
+  "pixelScale": 3,
+  "roomNames": {
+    "center": "Kitchen",
+    "lounge": "Living Room",
+    "zone": "Room"
+  },
+  "art": {
+    "kind": "generated",
+    "generator": "home"
+  },
+  "decor": {
+    "center": ["coffee_machine", "plant"],
+    "lounge": ["sofa", "rug", "lamp", "console"],
+    "zone": ["plant", "bookshelf", "crate", "lamp"]
+  },
+  "phrases": {
+    "assigned": [
+      "On it!",
+      "Sure thing!",
+      "Leave it to me.",
+      "Gotcha.",
+      "Yep, I'll do it.",
+      "Okie dokie!"
+    ],
+    "heading_out": [
+      "Off to my room.",
+      "Grabbing my laptop.",
+      "Brb, desk time.",
+      "Slippers on, let's go.",
+      "To the study!",
+      "Be right there."
+    ],
+    "done": [
+      "All done!",
+      "Finished, easy peasy.",
+      "Done and dusted.",
+      "That's sorted.",
+      "Ta-da!",
+      "Nailed it."
+    ],
+    "error": [
+      "Uh oh, that broke.",
+      "Well… that didn't work.",
+      "Oops. Spilled the tea.",
+      "Hmm, something's off.",
+      "Nope, error.",
+      "That went sideways."
+    ],
+    "waiting": [
+      "Need you for a sec!",
+      "Can I do this?",
+      "Your call on this one.",
+      "Quick question!",
+      "Waiting on you, no rush."
+    ],
+    "lounge": [
+      "Snack break.",
+      "Brb, couch.",
+      "Tea time!",
+      "Nap o'clock.",
+      "Feet up.",
+      "Kettle's on."
+    ],
+    "delegating": [
+      "Can you grab this one?",
+      "Your turn!",
+      "Mind helping with this?",
+      "Pass it to you.",
+      "Little job for you.",
+      "Could you handle this?"
+    ],
+    "arrive": [
+      "Knock knock!",
+      "Hiya, I'm here!",
+      "Came to help!",
+      "Door was open.",
+      "Extra hands here!"
+    ]
+  }
+}

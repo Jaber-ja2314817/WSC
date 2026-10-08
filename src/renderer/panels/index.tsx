@@ -1,9 +1,11 @@
 // Side panels (projects, crew, activity log, status bar) and the first-run setup screen.
 import { render } from 'preact';
 import type { StationStatus, WscApi } from '@shared/ipc';
+import type { Settings } from '@shared/settings';
 import type { StationSnapshot } from '@shared/types';
 import { FirstRun } from './FirstRun';
 import { Panels } from './Panels';
+import { SettingsPanel } from './Settings';
 import './panels.css';
 
 export interface MountPanelsOptions {
@@ -19,7 +21,13 @@ export interface PanelsHandle {
   select(agentKey?: string): void;
   /** Force the first-run screen on/off. Without a call it shows automatically when needed. */
   showFirstRun(show: boolean): void;
+  setSettings(settings: Settings): void;
+  /** Themes for the picker (built-ins first, then user themes). */
+  setThemes(themes: { id: string; name: string; source?: string }[]): void;
+  setVersion(version: string): void;
 }
+
+type Tab = 'station' | 'settings';
 
 const EMPTY: StationSnapshot = {
   projects: {},
@@ -40,6 +48,10 @@ export function mountPanels(el: HTMLElement, opts: MountPanelsOptions): PanelsHa
   let selected: string | undefined;
   let firstRunForced: boolean | undefined;
   let firstRunDismissed = false;
+  let tab: Tab = 'station';
+  let settings: Settings | null = null;
+  let themes: { id: string; name: string; source?: string }[] = [];
+  let version = '';
 
   const firstRunVisible = (): boolean => {
     if (firstRunForced !== undefined) return firstRunForced;
@@ -48,18 +60,42 @@ export function mountPanels(el: HTMLElement, opts: MountPanelsOptions): PanelsHa
   };
 
   const draw = (): void => {
-    render(
-      <Panels
-        snap={snap}
-        status={status}
-        selected={selected}
-        onFocusProject={opts.onFocusProject}
-        onSelectAgent={(key) => {
-          selected = key;
+    const tabButton = (id: Tab, label: string) => (
+      <button
+        type="button"
+        role="tab"
+        aria-selected={tab === id}
+        class={`wsc-tab${tab === id ? ' is-active' : ''}`}
+        onClick={() => {
+          tab = id;
           draw();
-          opts.onSelectAgent(key);
         }}
-      />,
+      >
+        {label}
+      </button>
+    );
+    render(
+      <div class="wsc-panel-root">
+        <div class="wsc-tabs" role="tablist">
+          {tabButton('station', 'Station')}
+          {tabButton('settings', '⚙ Settings')}
+        </div>
+        {tab === 'station' ? (
+          <Panels
+            snap={snap}
+            status={status}
+            selected={selected}
+            onFocusProject={opts.onFocusProject}
+            onSelectAgent={(key) => {
+              selected = key;
+              draw();
+              opts.onSelectAgent(key);
+            }}
+          />
+        ) : (
+          <SettingsPanel api={api} settings={settings} themes={themes} version={version} />
+        )}
+      </div>,
       el,
     );
     render(
@@ -99,6 +135,18 @@ export function mountPanels(el: HTMLElement, opts: MountPanelsOptions): PanelsHa
     },
     showFirstRun(show) {
       firstRunForced = show;
+      draw();
+    },
+    setSettings(next) {
+      settings = next;
+      draw();
+    },
+    setThemes(list) {
+      themes = list;
+      draw();
+    },
+    setVersion(v) {
+      version = v;
       draw();
     },
   };

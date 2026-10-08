@@ -1,0 +1,40 @@
+{
+  "id": "minimal-theme",
+  "name": "Minimal Mint",
+  "author": "Your Name",
+  "license": "CC0-1.0",
+  "version": "1.0.0",
+  "description": "A minimal example: reuses the built-in spaceship art with a mint palette and its own voice.",
+  "palette": {
+    "background": "#0f1a17",
+    "panel": "#16251f",
+    "text": "#e4f5ec",
+    "accent": "#6ee7b7",
+    "working": "#6ee7b7",
+    "waiting": "#fcd34d",
+    "done": "#a7f3d0",
+    "error": "#f87171",
+    "stale": "#6b7f76"
+  },
+  "tileSize": 16,
+  "pixelScale": 3,
+  "roomNames": {
+    "center": "Hub",
+    "lounge": "Greenhouse",
+    "zone": "Pod"
+  },
+  "art": {
+    "kind": "generated",
+    "generator": "spaceship"
+  },
+  "phrases": {
+    "assigned": ["On it!", "Leaf it to me."],
+    "heading_out": ["Heading out.", "Off to the pod."],
+    "done": ["Fresh and done!", "All wrapped up."],
+    "error": ["Oops, wilted.", "That didn't take."],
+    "waiting": ["Need your say-so.", "Your call?"],
+    "lounge": ["Back to the greenhouse.", "Watering break."],
+    "delegating": ["Could you grab this?", "Over to you."],
+    "arrive": ["Hello, hub!", "New sprout here."]
+  }
+}

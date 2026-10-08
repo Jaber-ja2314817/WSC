@@ -16,7 +16,7 @@ It is fed by an async hook plugin and by transcript backfill. Repo: `OWNER/wsc`.
   - Bind to `127.0.0.1` only, with a token on every request, and reject any `Origin` header.
   - No outbound network, no telemetry, no analytics, no accounts.
 - **Never slow down or alter Claude Code.** The hook forwarder:
-  - runs async;
+  - runs async on every event except `Stop` and `SessionEnd`, which are synchronous so headless runs report their end (see `docs/claude-code-integration.md`);
   - times out within 300 ms or less;
   - **always exits 0**;
   - **never writes to stdout or stderr**.
@@ -47,21 +47,33 @@ npm run package    # electron-builder → dist/ (dmg / nsis / AppImage)
 
 See `docs/architecture.md`; the Claude Code formats are documented in `docs/claude-code-integration.md`.
 
-- `src/shared/` is pure TypeScript with no Electron or DOM imports. Every module has tests.
-  - `types.ts`, `normalizer.ts`, `toolCategories.ts`, `projects.ts`, `store.ts`
-  - `layout.ts`, `astar.ts`, `bubbles.ts`, `redact.ts`
-- `src/main/` holds the main process: `server.ts`, `runtimeFile.ts`, `netGuard.ts`, `backfill.ts`, `tray.ts`, `windows.ts`.
-- `src/preload/` is the typed IPC bridge. The renderer is sandboxed with contextIsolation on.
-- `src/renderer/` holds `scene/` (PixiJS), `director/` (choreography), `themes/` (loader and generator) and `panels/` (Preact).
+- `src/shared/` is pure TypeScript with no Electron, DOM or `node:` imports. It also runs in the renderer, and every module has tests.
+  - Events and state: `types.ts`, `store.ts` (StationStore), `projects.ts` (cwd → project id).
+  - `normalizer/hook.ts` and `normalizer/transcript.ts` are the only parsers of raw Claude Code formats.
+  - Tools and privacy: `toolCategories.ts`, `redact.ts` (sanitizes every summary shown anywhere).
+  - Layout: `layoutTypes.ts` (contract), `layout.ts`, `astar.ts`.
+  - Other: `bubbles.ts` (rate limiter), `demoScript.ts`, `settings.ts` (zod), `themeSchema.ts` (zod), `ipc.ts` (channel names and the preload API type).
+- `src/main/` is the main process.
+  - `station.ts` wires server → normalizer → store → renderer snapshots, plus backfill and demo.
+  - `server.ts` (ingest and `/v1/command`), `runtimeFile.ts`, `netGuard.ts`, `backfill.ts`, `demo.ts`.
+  - `settings.ts` (settings.json and window-state.json), `appState.ts`, `windows.ts` (normal and compact), `tray.ts`, `userThemes.ts`.
+- `src/preload/` is the typed IPC bridge. The renderer is sandboxed with contextIsolation on, and its CSP forbids `unsafe-eval`. That is why `pixi.js/unsafe-eval` is imported.
+- `src/renderer/` holds:
+  - `director/`: choreography, pure, tested under node. `types.ts` is the frame contract.
+  - `scene/`: PixiJS `StationScene` and `Camera`.
+  - `themes/`: loader, `ThemeManager`, pixel generators in `generators/`, `runtime.ts`. `types.ts` is the `ThemeRuntime` contract.
+  - `panels/`: Preact side panels, settings, first-run and compact views.
+  - `src/main.ts`: the bootstrap.
 - `plugin/` is the Claude Code plugin:
   - `.claude-plugin/plugin.json`
-  - `hooks/hooks.json` and `hooks/forward.mjs`
+  - `hooks/hooks.json` and `hooks/forward.mjs`. The forwarder is self-contained, and it must not import anything that could fail to load.
   - `skills/station/SKILL.md`
-  - `scripts/launch.mjs`
+  - `scripts/launch.mjs` and `scripts/runtime-path.mjs`
 - The marketplace manifest is at `.claude-plugin/marketplace.json` and points to `./plugin`.
-- `themes/<id>/` holds `theme.json` plus assets. The built-in themes are `spaceship` (default), `office`, `home` and `terminal`.
+- `themes/<id>/theme.json`: the built-in themes are `spaceship` (default), `office`, `home` and `terminal`. Their art is generated in `src/renderer/themes/generators/<id>.ts` and registered in `generators/index.ts`.
+- Test isolation env vars: `WSC_RUNTIME_FILE`, `WSC_STATE_FILE`, `WSC_USER_DATA`, `WSC_THEMES_DIR`. E2E tests run one Electron app at a time (`workers: 1`, single-instance lock).
 
-**Rule:** raw Claude Code hook and transcript formats are parsed **only** in `src/shared/normalizer.ts`. Everything else consumes `StationEvent`.
+**Rule:** raw Claude Code hook and transcript formats are parsed **only** in `src/shared/normalizer/`. Everything else consumes `StationEvent`.
 
 **Rule:** truth beats animation. The store is the source of truth, and the director shortens or skips walks rather than lag behind it.
 
@@ -85,7 +97,7 @@ See `docs/architecture.md`; the Claude Code formats are documented in `docs/clau
   3. Unknown tools must keep falling back to `other`.
 - **A hook event:**
   1. Register it in `plugin/hooks/hooks.json`, as an async command hook running the same `forward.mjs`.
-  2. Handle it in `src/shared/normalizer.ts` and add tests with a **synthetic** payload.
+  2. Handle it in `src/shared/normalizer/hook.ts` and add tests with a **synthetic** payload.
   3. Document its fields in `docs/claude-code-integration.md`.
 - **A theme:** follow `docs/themes.md`. The theme folder holds `theme.json` and assets. The manifest is zod-validated, and a broken theme falls back to the default theme.
 - **Catchphrases:** edit `phrases.<moment>` in the theme's `theme.json`. Each moment is a list, and one entry is picked at random.
@@ -110,6 +122,6 @@ See `docs/architecture.md`; the Claude Code formats are documented in `docs/clau
 - Commit real transcripts, real usernames or home paths, tokens, or secrets.
 - Add network calls or telemetry, or bind to anything other than `127.0.0.1`.
 - Add stdout or stderr output, or a non-zero exit code, to `plugin/hooks/forward.mjs`.
-- Parse raw Claude Code formats outside the normalizer.
+- Parse raw Claude Code formats outside `src/shared/normalizer/`.
 - Add dependencies with non-permissive licenses, or art you can't license.
 - Overwrite a user's `~/.claude/settings.json`. Merge into it, or tell the user what to change.

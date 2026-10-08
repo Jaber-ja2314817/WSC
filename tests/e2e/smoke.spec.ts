@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test';
 
-// Isolated runtime file so the test never touches a real install's port/token.
+// Isolated runtime file and profile so the test never touches a real install.
 const env = (): Record<string, string> => ({
   ...(process.env as Record<string, string>),
   WSC_RUNTIME_FILE: join(mkdtempSync(join(tmpdir(), 'wsc-e2e-')), 'runtime.json'),
+  WSC_USER_DATA: mkdtempSync(join(tmpdir(), 'wsc-e2e-ud-')),
 });
 
 async function launch(args: string[]): Promise<{ app: ElectronApplication; errors: string[] }> {

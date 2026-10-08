@@ -341,7 +341,8 @@
 }
 
 .wsc-firstrun button,
-.wsc-actions button {
+.wsc-actions button,
+.wsc-settings .wsc-btn {
   font: inherit;
   font-size: 12px;
   color: var(--text);
@@ -353,13 +354,16 @@
 }
 
 .wsc-firstrun button:hover,
-.wsc-firstrun button:focus-visible {
+.wsc-firstrun button:focus-visible,
+.wsc-settings .wsc-btn:hover,
+.wsc-settings .wsc-btn:focus-visible {
   background: var(--accent);
   color: #000;
   outline: none;
 }
 
-.wsc-firstrun button:disabled {
+.wsc-firstrun button:disabled,
+.wsc-settings .wsc-btn:disabled {
   opacity: 0.6;
   cursor: progress;
 }
@@ -389,4 +393,160 @@
   padding: 0;
   font-size: 16px;
   line-height: 1;
+}
+
+/* Compact strip shares the status-light colors. */
+.wsc-compact {
+  --c-working: var(--working, #5ad1ff);
+  --c-waiting: var(--waiting, #ffcf4a);
+  --c-done: var(--done, #6fe08a);
+  --c-error: var(--error, #ff6b6b);
+  --c-stale: var(--stale, #8a93b2);
+}
+
+/* ── tabs ─────────────────────────────────────────────────────────────────── */
+.wsc-panel-root {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wsc-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.wsc-tab {
+  flex: 1;
+  font: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  background: rgb(0 0 0 / 0.3);
+  border: 2px solid #000;
+  padding: 5px 6px;
+  cursor: pointer;
+}
+
+.wsc-tab.is-active {
+  color: #000;
+  background: var(--accent);
+}
+
+.wsc-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── settings ─────────────────────────────────────────────────────────────── */
+.wsc-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color-scheme: dark;
+}
+
+.wsc-section-plain {
+  border: 2px solid #000;
+  background: rgb(0 0 0 / 0.15);
+  padding: 6px 8px 8px;
+}
+
+.wsc-section-plain h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+.wsc-set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.wsc-set-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.wsc-set-hint {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.wsc-set-control input[type='number'] {
+  width: 72px;
+}
+
+.wsc-settings input[type='number'],
+.wsc-settings input[type='text'],
+.wsc-settings select {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: #0b0e1a;
+  border: 1px solid var(--muted);
+  padding: 2px 4px;
+  max-width: 160px;
+}
+
+.wsc-mappings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.wsc-mapping {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wsc-mapping code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wsc-mapping-new input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+}
+
+.wsc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wsc-btn-small {
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.wsc-ok {
+  color: #6fe08a;
+}
+
+.wsc-err {
+  color: #ff6b6b;
+}
+
+.wsc-muted {
+  color: var(--muted);
+}
+
+.wsc-about p {
+  margin: 4px 0;
+  font-size: 12px;
 }

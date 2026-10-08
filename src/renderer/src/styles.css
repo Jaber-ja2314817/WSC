@@ -112,3 +112,78 @@ body {
 [hidden] {
   display: none !important;
 }
+
+/* ── compact mode: small frameless always-on-top window ───────────────────── */
+body.compact #app {
+  flex-direction: column;
+}
+
+body.compact #panel,
+body.compact #hud {
+  display: none;
+}
+
+#compact {
+  flex: 0 0 auto;
+  background: var(--panel);
+  border-bottom: 2px solid #000;
+  font-size: 11px;
+}
+
+/* The bar drags the frameless window; buttons inside it must stay clickable. */
+.wsc-compact-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.wsc-compact-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+  font-weight: bold;
+}
+
+.wsc-compact-btn {
+  -webkit-app-region: no-drag;
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--muted);
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.wsc-compact-list {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  padding: 2px 8px 4px;
+  list-style: none;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.wsc-compact-list::-webkit-scrollbar {
+  display: none;
+}
+
+.wsc-compact-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wsc-compact-name {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,0 +1,102 @@
+{
+  "id": "office",
+  "name": "Office",
+  "author": "WSC contributors",
+  "license": "MIT",
+  "version": "1.0.0",
+  "description": "A cozy pixel office: orchestrators meet at the wooden table, idle crew hang out in the break room, and every project is a team pod of desks.",
+  "palette": {
+    "background": "#2b211c",
+    "panel": "#3a2c24",
+    "text": "#fbf3e4",
+    "accent": "#2bb0a6",
+    "working": "#5cb85c",
+    "waiting": "#f0ad4e",
+    "done": "#6fa8dc",
+    "error": "#d9534f",
+    "stale": "#9a8f84"
+  },
+  "tileSize": 16,
+  "pixelScale": 3,
+  "roomNames": {
+    "center": "Meeting Room",
+    "lounge": "Break Room",
+    "zone": "Team"
+  },
+  "art": {
+    "kind": "generated",
+    "generator": "office"
+  },
+  "decor": {
+    "center": ["console", "lamp", "plant"],
+    "lounge": ["sofa", "coffee_machine", "plant", "rug"],
+    "zone": ["plant", "bookshelf", "crate", "console"]
+  },
+  "ambient": {
+    "starfield": false
+  },
+  "phrases": {
+    "assigned": [
+      "On it!",
+      "Adding it to my sprint.",
+      "Happy to take this.",
+      "I'll own that one.",
+      "Let me grab my laptop.",
+      "Ticket accepted."
+    ],
+    "heading_out": [
+      "Heading to my desk.",
+      "Let's do this!",
+      "Shipping it.",
+      "Heads down, back soon.",
+      "Blocking my calendar.",
+      "Deep work mode."
+    ],
+    "done": [
+      "Done and dusted!",
+      "Merged and shipped.",
+      "All wrapped up.",
+      "Ready for review!",
+      "Closing the ticket.",
+      "Circling back: it's done."
+    ],
+    "error": [
+      "Hmm… that broke.",
+      "Houston, we have a bug.",
+      "Tests are red, sorry.",
+      "Need a second look.",
+      "That didn't go as planned.",
+      "Filing a bug report."
+    ],
+    "waiting": [
+      "Need your sign-off.",
+      "Quick question for you!",
+      "Blocked on approval.",
+      "Got a sec?",
+      "Waiting on your call."
+    ],
+    "lounge": [
+      "Coffee first.",
+      "Grabbing a snack.",
+      "Water-cooler time.",
+      "Brb, refilling my mug.",
+      "Stretch break!",
+      "Taking five."
+    ],
+    "delegating": [
+      "Can you take this one?",
+      "Looping you in.",
+      "Assigning it to you.",
+      "You're the expert here.",
+      "Let's divide and conquer.",
+      "New ticket for you."
+    ],
+    "arrive": [
+      "Morning, everyone!",
+      "New hire reporting in!",
+      "Badge works, I'm in.",
+      "Extra hands here!",
+      "Just got off the elevator."
+    ]
+  }
+}

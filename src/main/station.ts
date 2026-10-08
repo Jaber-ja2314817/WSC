@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { hookSessionInfo, normalizeHookPayload } from '@shared/normalizer';
 import { StationStore } from '@shared/store';
-import type { StationEvent, StationSnapshot } from '@shared/types';
+import type { StationEvent, StationSnapshot, ToolCategory } from '@shared/types';
 import { backfillRecent, backfillTranscript } from './backfill';
 import { DemoPlayer } from './demo';
 import { readRuntimeFile, removeRuntimeFile, writeRuntimeFile } from './runtimeFile';
@@ -32,6 +32,16 @@ export interface StationOptions {
   /** Mode or port changed. */
   onStatusChange?: () => void;
   onCommand?: (cmd: StationCommand) => unknown;
+  /** Initial tunables (settings); change later with `configure`. */
+  tuning?: StationTuning;
+}
+
+/** Settings-driven knobs that can change while running. */
+export interface StationTuning {
+  toolOverrides?: Record<string, ToolCategory>;
+  fullToolDetails?: boolean;
+  staleMs?: number;
+  sessionLingerMs?: number;
 }
 
 export class Station {
@@ -46,8 +56,13 @@ export class Station {
   private sawHookEvent = false;
   private currentMode: StationMode;
 
+  private tuning: StationTuning = {};
+  /** While paused, events are still ingested but no snapshots are pushed. */
+  paused = false;
+
   constructor(private readonly opts: StationOptions) {
     this.currentMode = opts.mode ?? 'live';
+    if (opts.tuning) this.configure(opts.tuning);
     this.unsubscribe = this.store.subscribe(() => (this.dirty = true));
   }
 
@@ -67,7 +82,7 @@ export class Station {
     // Coalesce bursts: at most one snapshot per PUSH_INTERVAL_MS.
     this.timers.push(
       setInterval(() => {
-        if (!this.dirty) return;
+        if (!this.dirty || this.paused) return;
         this.dirty = false;
         this.opts.onSnapshot(this.store.snapshot());
       }, PUSH_INTERVAL_MS),
@@ -92,6 +107,27 @@ export class Station {
     });
     this.opts.onStatusChange?.();
     if (this.currentMode === 'live') this.backfill();
+  }
+
+  /** Apply settings changes. Tool mapping/summary changes affect events from now on. */
+  configure(t: StationTuning): void {
+    this.tuning = { ...this.tuning, ...t };
+    this.store.setTimings({
+      ...(this.tuning.staleMs !== undefined ? { staleMs: this.tuning.staleMs } : {}),
+      ...(this.tuning.sessionLingerMs !== undefined
+        ? { sessionLingerMs: this.tuning.sessionLingerMs }
+        : {}),
+    });
+  }
+
+  clearIdleProjects(idleMs: number): void {
+    this.store.clearIdleProjects(Date.now(), idleMs);
+  }
+
+  /** Resume pushing after a pause: send the current state once. */
+  resume(): void {
+    this.paused = false;
+    this.dirty = true;
   }
 
   ingest(evs: StationEvent[]): void {
@@ -159,7 +195,7 @@ export class Station {
 
   private backfill(): void {
     // Tick right away so long-silent backfilled agents show as stale/done immediately.
-    void backfillRecent({ onEvents: (evs) => this.ingest(evs) }).then(() =>
+    void backfillRecent({ ...this.normalizeOpts(), onEvents: (evs) => this.ingest(evs) }).then(() =>
       this.store.tick(Date.now()),
     );
   }
@@ -167,6 +203,7 @@ export class Station {
   private resetStore(): void {
     this.unsubscribe();
     this.store = new StationStore();
+    this.configure({});
     this.unsubscribe = this.store.subscribe(() => (this.dirty = true));
     this.seenSessions.clear();
     this.dirty = true;
@@ -174,7 +211,7 @@ export class Station {
 
   private ingestHook(raw: unknown, receivedAt: number): void {
     if (this.currentMode === 'demo-pinned') return;
-    const events = normalizeHookPayload(raw, receivedAt);
+    const events = normalizeHookPayload(raw, receivedAt, this.normalizeOpts());
     if (events.length === 0) return;
     if (!this.sawHookEvent) {
       this.sawHookEvent = true;
@@ -188,9 +225,22 @@ export class Station {
     if (info && !this.seenSessions.has(info.sessionId)) {
       this.seenSessions.add(info.sessionId);
       if (info.transcriptPath) {
-        void backfillTranscript(info.transcriptPath, { onEvents: (evs) => this.ingest(evs) });
+        void backfillTranscript(info.transcriptPath, {
+          ...this.normalizeOpts(),
+          onEvents: (evs) => this.ingest(evs),
+        });
       }
     }
     this.ingest(events);
+  }
+
+  private normalizeOpts(): {
+    toolOverrides?: Record<string, ToolCategory>;
+    fullToolDetails?: boolean;
+  } {
+    return {
+      ...(this.tuning.toolOverrides ? { toolOverrides: this.tuning.toolOverrides } : {}),
+      ...(this.tuning.fullToolDetails ? { fullToolDetails: true } : {}),
+    };
   }
 }

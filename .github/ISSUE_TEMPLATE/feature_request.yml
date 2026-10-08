@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an idea for WSC.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        WSC is watch-only, local-only and zero-cost **by design**: ideas that send prompts, call model APIs, add network access or telemetry are out of scope. Check the README roadmap first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to implement this myself.

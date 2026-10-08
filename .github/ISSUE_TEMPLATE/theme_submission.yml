@@ -1,0 +1,47 @@
+name: Theme submission
+description: Share a community theme for WSC.
+labels: [theme]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        See [Submitting a theme](../blob/main/CONTRIBUTING.md#submitting-a-theme) and [docs/themes.md](../blob/main/docs/themes.md).
+  - type: input
+    id: id
+    attributes:
+      label: Theme id and name
+      placeholder: 'submarine — "Deep Sea Lab"'
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Where is it?
+      description: Link to your repo/folder, or say you'll open a PR adding `themes/<id>/`.
+    validations:
+      required: true
+  - type: textarea
+    id: preview
+    attributes:
+      label: Preview screenshot
+      description: Drag in a screenshot of the theme in demo mode (`npm run demo` or `/station demo`).
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: License of the theme and its art
+      placeholder: MIT / CC0-1.0
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: The art is my original work, or CC0/MIT-compatible with attribution in ASSETS_LICENSES.md.
+          required: true
+        - label: No characters, logos or art from games, films or other IP, and no Anthropic/Claude branding.
+          required: true
+        - label: The manifest validates (no warning banner) and covers every animation, gear category and catchphrase moment.
+          required: true

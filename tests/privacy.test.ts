@@ -1,0 +1,231 @@
+// Privacy: secrets and private details in tool inputs must never reach the snapshot (panels,
+// activity log) or the director's frame (speech bubbles, crew tool labels). Synthetic data only.
+import { describe, expect, it } from 'vitest';
+import { Director } from '../src/renderer/director/director';
+import { makePathfinder } from '../src/shared/astar';
+import { computeLayout } from '../src/shared/layout';
+import { normalizeHookPayload } from '../src/shared/normalizer/hook';
+import { normalizeTranscriptLine } from '../src/shared/normalizer/transcript';
+import { StationStore } from '../src/shared/store';
+import type { StationEvent, StationSnapshot } from '../src/shared/types';
+import { CWD_A, SESSION_A, hookPayload, toolPayload } from './fixtures/hookPayloads';
+
+/** Every value here must never appear in any output. */
+const SECRETS = {
+  bearer: 'eyJhbGciOiJIUzI1NiJ9fakeBearerToken123',
+  password: 'hunter2-very-secret',
+  openai: 'sk-proj-FAKEFAKEFAKEFAKEFAKE1234567890',
+  github: 'ghp_FAKEfakeFAKEfakeFAKEfake1234567890',
+  aws: 'AKIAFAKEFAKEFAKE1234',
+  urlPass: 's3cr3tpw',
+  base64: 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5',
+  username: 'alice-private',
+  prompt: 'my private prompt about the acquisition of FooCorp',
+  query: 'token=abc123querysecret',
+} as const;
+
+const SUB = { agentId: 'a1b2c3d4e5f6a7b8c', agentType: 'general-purpose' };
+
+/** Payloads that each carry at least one secret. Tool use ids pair starts with ends. */
+function payloads(): Record<string, unknown>[] {
+  const tools: [string, Record<string, unknown>][] = [
+    ['Bash', { command: `curl -H "Authorization: Bearer ${SECRETS.bearer}" localhost` }],
+    ['Bash', { command: `mysql --password=${SECRETS.password} -u root` }],
+    ['Bash', { command: `OPENAI_API_KEY=${SECRETS.openai} npm start` }],
+    ['Bash', { command: `git clone https://x:${SECRETS.github}@github.com/a/b` }],
+    ['Bash', { command: `curl -u admin:${SECRETS.password} localhost:3000` }],
+    ['Bash', { command: `psql --password ${SECRETS.urlPass} db` }],
+    ['Bash', { command: `aws configure set aws_access_key_id ${SECRETS.aws}` }],
+    ['Bash', { command: `echo ${SECRETS.base64} | base64 -d` }],
+    ['Read', { file_path: `/Users/${SECRETS.username}/secret-project/.env` }],
+    ['Edit', { file_path: `/home/${SECRETS.username}/work/auth.ts`, old_string: SECRETS.password }],
+    ['Write', { file_path: `/home/${SECRETS.username}/notes.md`, content: SECRETS.openai }],
+    ['WebFetch', { url: `https://bob:${SECRETS.urlPass}@docs.example.com/p?${SECRETS.query}` }],
+    ['WebSearch', { query: `api_key=${SECRETS.github} leaked` }],
+    ['Grep', { pattern: `password=${SECRETS.password}`, path: `/home/${SECRETS.username}` }],
+    ['mcp__vault__read_secret', { name: SECRETS.password }],
+  ];
+  const out: Record<string, unknown>[] = [
+    hookPayload('SessionStart', { source: 'startup' }),
+    hookPayload('UserPromptSubmit', { prompt: SECRETS.prompt }),
+    hookPayload('SubagentStart', {}, SUB),
+  ];
+  tools.forEach(([name, input], i) => {
+    const id = `toolu_priv_${i}`;
+    const opts = i % 2 === 0 ? SUB : {};
+    out.push(toolPayload('PreToolUse', name, input, id, opts));
+    out.push(
+      hookPayload(
+        'PostToolUse',
+        {
+          tool_name: name,
+          tool_input: input,
+          tool_use_id: id,
+          tool_response: { stdout: SECRETS.openai },
+        },
+        opts,
+      ),
+    );
+  });
+  out.push(
+    toolPayload('PermissionRequest', 'Bash', { command: `export TOKEN=${SECRETS.github}` }, 'p1'),
+    hookPayload('Notification', {
+      message: `Claude needs permission for ${SECRETS.password}`,
+      notification_type: 'permission_prompt',
+    }),
+    hookPayload('Stop', { last_assistant_message: SECRETS.prompt }),
+    hookPayload('SubagentStop', { last_assistant_message: SECRETS.openai }, SUB),
+  );
+  return out;
+}
+
+function expectNoSecrets(label: string, value: unknown): void {
+  const json = JSON.stringify(value);
+  for (const [name, secret] of Object.entries(SECRETS)) {
+    expect(json.includes(secret), `${label} leaked ${name}`).toBe(false);
+  }
+}
+
+function runThroughStore(events: StationEvent[]): StationSnapshot {
+  const store = new StationStore();
+  store.applyMany(events);
+  return store.snapshot();
+}
+
+/** Drive the director through the run and collect every frame it produces. */
+function directorFrames(events: StationEvent[]): unknown[] {
+  const store = new StationStore();
+  const director = new Director({
+    findPath: () => null,
+    phrases: () => ['On it!'],
+    random: () => 0,
+    settings: { reduceMotion: true },
+  });
+  const frames: unknown[] = [];
+  let now = 1_000;
+  for (const e of events) {
+    store.apply({ ...e, ts: now });
+    const snap = store.snapshot();
+    const projects = Object.values(snap.projects).map((p) => ({
+      id: p.id,
+      name: p.name,
+      order: p.order,
+      agentCount: Object.values(snap.agents).filter((a) => a.projectId === p.id).length,
+    }));
+    const layout = computeLayout({ projects, orchestratorSeats: 1, loungeSize: 6 });
+    director.setLayout(layout, makePathfinder(layout));
+    director.setSnapshot(snap, now);
+    // Several frames per event: bubbles are rate-limited and appear over time.
+    for (let i = 0; i < 4; i++) {
+      now += 700;
+      frames.push(director.update(now, 700));
+    }
+  }
+  return frames;
+}
+
+describe('privacy: hook path', () => {
+  const events = payloads().flatMap((p, i) => normalizeHookPayload(p, 1_000 + i));
+
+  it('produces events for the run', () => {
+    expect(events.length).toBeGreaterThan(20);
+  });
+
+  it('normalized events carry no secrets', () => {
+    expectNoSecrets('events', events);
+  });
+
+  it('the snapshot (panels + activity log) carries no secrets', () => {
+    const snap = runThroughStore(events);
+    expect(snap.log.length).toBeGreaterThan(10);
+    expectNoSecrets('snapshot', snap);
+  });
+
+  it('director frames (bubbles + crew labels) carry no secrets', () => {
+    const frames = directorFrames(events);
+    const bubbles = frames.flatMap((f) => (f as { bubbles: { text: string }[] }).bubbles);
+    expect(bubbles.length).toBeGreaterThan(0);
+    expectNoSecrets('director', frames);
+  });
+
+  it('file summaries are basenames only', () => {
+    const summaries = events
+      .filter((e) => ['Read', 'Edit', 'Write'].includes(e.tool?.name ?? ''))
+      .map((e) => e.tool?.summary);
+    expect(new Set(summaries)).toEqual(new Set(['.env', 'auth.ts', 'notes.md']));
+  });
+
+  it('WebFetch summaries are the hostname only', () => {
+    const s = events.filter((e) => e.tool?.name === 'WebFetch').map((e) => e.tool?.summary);
+    expect(new Set(s)).toEqual(new Set(['docs.example.com']));
+  });
+
+  it('never stores the user prompt text', () => {
+    const prompt = events.find((e) => e.kind === 'user_prompt');
+    expect(prompt).toBeDefined();
+    expect(JSON.stringify(prompt)).not.toContain('acquisition');
+  });
+});
+
+describe('privacy: transcript path', () => {
+  const line = (rec: Record<string, unknown>): string =>
+    JSON.stringify({
+      timestamp: '2026-01-01T10:00:00.000Z',
+      sessionId: SESSION_A,
+      cwd: CWD_A,
+      uuid: `u-${Math.random()}`,
+      ...rec,
+    });
+  const ctx = { sessionId: SESSION_A, agentId: 'orchestrator', cwd: CWD_A, toolNames: new Map() };
+
+  it('tool_use / tool_result lines carry no secrets into events or the snapshot', () => {
+    const lines = [
+      line({ type: 'user', message: { role: 'user', content: SECRETS.prompt } }),
+      line({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: SECRETS.openai },
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'Bash',
+              input: {
+                command: `curl -u admin:${SECRETS.password} -H "Authorization: Bearer ${SECRETS.bearer}"`,
+              },
+            },
+            {
+              type: 'tool_use',
+              id: 't2',
+              name: 'Read',
+              input: { file_path: `/Users/${SECRETS.username}/keys/${'id_rsa'}` },
+            },
+            {
+              type: 'tool_use',
+              id: 't3',
+              name: 'WebFetch',
+              input: { url: `https://u:${SECRETS.urlPass}@x.example.org/?${SECRETS.query}` },
+            },
+          ],
+        },
+      }),
+      line({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: SECRETS.github },
+            { type: 'tool_result', tool_use_id: 't2', content: SECRETS.aws, is_error: true },
+          ],
+        },
+      }),
+    ];
+    const events = lines.flatMap((l) => normalizeTranscriptLine(l, ctx));
+    expect(events.length).toBeGreaterThanOrEqual(5);
+    expectNoSecrets('transcript events', events);
+    expectNoSecrets('transcript snapshot', runThroughStore(events));
+    expect(events.find((e) => e.tool?.name === 'Read')?.tool?.summary).toBe('id_rsa');
+    expect(events.find((e) => e.tool?.name === 'WebFetch')?.tool?.summary).toBe('x.example.org');
+  });
+});

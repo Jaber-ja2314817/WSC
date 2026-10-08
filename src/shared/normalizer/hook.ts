@@ -12,6 +12,8 @@ import {
 
 export interface HookNormalizeOptions {
   toolOverrides?: Record<string, ToolCategory>;
+  /** Longer summaries (still redacted). Off by default. */
+  fullToolDetails?: boolean;
 }
 
 const WAITING_NOTIFICATIONS = new Set([
@@ -80,7 +82,7 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
   const tool = (ok?: boolean): StationEvent['tool'] => {
     if (!toolName) return undefined;
     const input = p['tool_input'];
-    const summary = summarizeTool(toolName, input);
+    const summary = summarizeTool(toolName, input, { full: opts?.fullToolDetails === true });
     return {
       name: toolName,
       category: categorizeTool(toolName, opts?.toolOverrides),

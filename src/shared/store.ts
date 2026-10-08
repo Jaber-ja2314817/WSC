@@ -39,9 +39,9 @@ const ENDED_USE_IDS_CAP = 64;
 
 export class StationStore {
   private readonly logCap: number;
-  private readonly staleMs: number;
+  private staleMs: number;
   private readonly lostMs: number;
-  private readonly sessionLingerMs: number;
+  private sessionLingerMs: number;
   private readonly dedupeCap: number;
 
   private readonly projects = new Map<string, ProjectState>();
@@ -110,6 +110,14 @@ export class StationStore {
     }
     if (changed) this.emit();
     return changed;
+  }
+
+  /** Update stale/linger timings at runtime (settings changes). Applied on the next tick. */
+  setTimings(t: { staleMs?: number; sessionLingerMs?: number }): void {
+    if (t.staleMs !== undefined && t.staleMs > 0) this.staleMs = t.staleMs;
+    if (t.sessionLingerMs !== undefined && t.sessionLingerMs >= 0) {
+      this.sessionLingerMs = t.sessionLingerMs;
+    }
   }
 
   clearIdleProjects(now: number, idleMs: number): void {

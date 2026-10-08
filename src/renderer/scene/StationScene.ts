@@ -17,7 +17,7 @@ import { DESK_H, DESK_W } from '@shared/layoutTypes';
 import type { AgentStatus } from '@shared/types';
 import type { BubbleView, CrewView, DirectorFrame, ZoneStatusView } from '../director/types';
 import type { ThemeRuntime } from '../themes/types';
-import { Camera } from './Camera';
+import { Camera, type View } from './Camera';
 import { formatElapsed, stackBoxes, truncateLabel, zoneSummary, type Box } from './format';
 
 const UNFOLD_MS = 600;
@@ -85,6 +85,7 @@ export class StationScene {
   private selected: string | undefined;
   private hovered: string | undefined;
   private hasFitted = false;
+  private pendingView: View | null = null;
   private detachInput: (() => void) | null = null;
   private resolution = Math.max(1, Math.round(window.devicePixelRatio || 1));
 
@@ -149,6 +150,22 @@ export class StationScene {
 
   fitAll(): void {
     this.camera.fitAll();
+  }
+
+  /** Saved camera to use instead of the initial "fit all" (call before the first layout). */
+  restoreView(view: View | null): void {
+    if (!view) return;
+    if (this.hasFitted) this.camera.setView(view);
+    else this.pendingView = view;
+  }
+
+  getView(): View {
+    return this.camera.getView();
+  }
+
+  /** Animate the camera to show a tile-space rect (e.g. compact mode's "center + active crew"). */
+  focusTiles(r: Rect, animate = true): void {
+    this.camera.focusRect(this.rectPx(r), animate);
   }
 
   focusZone(projectId: string): void {
@@ -318,7 +335,9 @@ export class StationScene {
     this.camera.setWorldSize(layout.width * T, layout.height * T);
     if (!this.hasFitted) {
       this.hasFitted = true;
-      this.camera.fitAll(false);
+      if (this.pendingView) this.camera.setView(this.pendingView);
+      else this.camera.fitAll(false);
+      this.pendingView = null;
     }
   }
 

@@ -1,4 +1,5 @@
 // IPC channel names and the API the preload exposes to the renderer.
+import type { Settings } from './settings';
 import type { StationSnapshot } from './types';
 
 export const IPC = {
@@ -11,7 +12,29 @@ export const IPC = {
   command: 'wsc:command',
   status: 'wsc:status',
   copyText: 'wsc:copy-text',
+  listUserThemes: 'wsc:list-user-themes',
+  getUserTheme: 'wsc:get-user-theme',
+  themesChanged: 'wsc:themes-changed',
+  getSettings: 'wsc:get-settings',
+  setSettings: 'wsc:set-settings',
+  settings: 'wsc:settings',
+  clearIdleProjects: 'wsc:clear-idle-projects',
+  getWindowMode: 'wsc:get-window-mode',
+  setWindowMode: 'wsc:set-window-mode',
+  windowMode: 'wsc:window-mode',
+  getCamera: 'wsc:get-camera',
+  saveCamera: 'wsc:save-camera',
+  reportThemes: 'wsc:report-themes',
 } as const;
+
+export type WindowMode = 'normal' | 'compact';
+
+/** Persisted camera position (world px offset + zoom), per window mode. */
+export interface CameraState {
+  x: number;
+  y: number;
+  zoom: number;
+}
 
 export interface AppInfo {
   name: string;
@@ -43,6 +66,18 @@ export interface RendererCommand {
   arg?: string;
 }
 
+/** A theme found in the user themes folder (not yet validated). */
+export interface UserThemeInfo {
+  id: string;
+  name: string;
+}
+
+/** A user theme's raw manifest plus its PNG assets as data: URLs, keyed by manifest path. */
+export interface UserThemeData {
+  manifest: unknown;
+  assets: Record<string, string>;
+}
+
 export interface WscApi {
   getSnapshot(): Promise<StationSnapshot>;
   onSnapshot(cb: (snap: StationSnapshot) => void): () => void;
@@ -54,4 +89,21 @@ export interface WscApi {
   onCommand(cb: (cmd: RendererCommand) => void): () => void;
   /** Clipboard write via main (the sandboxed renderer has no clipboard permission). */
   copyText(text: string): Promise<void>;
+  /** Themes in <appData>/WSC/themes. */
+  listUserThemes(): Promise<UserThemeInfo[]>;
+  getUserTheme(id: string): Promise<UserThemeData | null>;
+  /** Dev only: the user themes folder changed on disk. */
+  onThemesChanged(cb: () => void): () => void;
+  getSettings(): Promise<Settings>;
+  /** Partial update; invalid fields are ignored. Resolves to the saved settings. */
+  setSettings(patch: Partial<Settings>): Promise<Settings>;
+  onSettings(cb: (settings: Settings) => void): () => void;
+  clearIdleProjects(): Promise<void>;
+  getWindowMode(): Promise<WindowMode>;
+  setWindowMode(mode: WindowMode | 'toggle'): Promise<void>;
+  onWindowMode(cb: (mode: WindowMode) => void): () => void;
+  getCamera(mode: WindowMode): Promise<CameraState | null>;
+  saveCamera(mode: WindowMode, camera: CameraState): Promise<void>;
+  /** Renderer → main: the themes it can load (built-in + user), for the tray menu. */
+  reportThemes(themes: { id: string; name: string }[]): void;
 }

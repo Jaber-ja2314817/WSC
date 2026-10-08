@@ -3,7 +3,7 @@
 // the generator registry. A broken or unknown theme never blanks the window — it falls back to
 // Spaceship and returns a human-readable `warning` for the UI to show.
 import { validateTheme, type ThemeManifest } from '@shared/themeSchema';
-import { spaceshipGenerator } from './generators/spaceship';
+import { BUILT_IN_GENERATORS } from './generators';
 import type { ArtGenerator } from './generators/types';
 import { createGeneratedRuntime, createSheetRuntime, loadImageSource } from './runtime';
 import type { ThemeRuntime } from './types';
@@ -27,7 +27,12 @@ export function registerGenerator(id: string, generator: ArtGenerator): void {
   generators.set(id, generator);
 }
 
-registerGenerator('spaceship', spaceshipGenerator);
+for (const [id, gen] of Object.entries(BUILT_IN_GENERATORS)) registerGenerator(id, gen);
+
+/** Generator ids a manifest may name in `art.generator`. */
+export function generatorIds(): string[] {
+  return [...generators.keys()].sort();
+}
 
 // Every folder under /themes with a theme.json is a built-in theme.
 const manifestModules = import.meta.glob('../../../themes/*/theme.json', {
