@@ -1,0 +1,54 @@
+{
+  "name": "wsc",
+  "productName": "WSC",
+  "version": "0.1.0",
+  "description": "Work Space Claude \u2014 a live 2D pixel-art station for watching Claude Code agents work",
+  "main": "./out/main/index.js",
+  "author": "WSC contributors",
+  "license": "MIT",
+  "homepage": "https://github.com/OWNER/wsc",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "demo": "electron-vite dev -- --demo",
+    "start": "electron-vite preview",
+    "build": "npm run typecheck && electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "npm run build && electron-builder",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:win": "npm run build && electron-builder --win",
+    "package:linux": "npm run build && electron-builder --linux",
+    "test:e2e": "electron-vite build && playwright test"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^2.0.0",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.64.0",
+    "@preact/preset-vite": "^2.10.6",
+    "@types/node": "^24.19.1",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.17.0",
+    "electron-vite": "^5.0.0",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.9",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.71.1",
+    "vite": "^7.3.7",
+    "vitest": "^5.0.3"
+  },
+  "dependencies": {
+    "pixi.js": "^8.22.0",
+    "preact": "^11.0.1",
+    "zod": "^4.6.5"
+  }
+}

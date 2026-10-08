@@ -1,0 +1,14 @@
+# one-time build brief — never commit
+wsc-build-prompt.md
+
+node_modules/
+out/
+dist/
+coverage/
+*.log
+.DS_Store
+.vite/
+test-results/
+playwright-report/
+.env
+.env.*
