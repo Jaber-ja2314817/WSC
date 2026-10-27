@@ -12,12 +12,17 @@
   <body>
     <div id="app">
       <div id="compact" hidden></div>
+      <aside id="dashboard" aria-label="Dashboard"></aside>
       <div id="stage">
         <div id="hud">
           <button id="fit-all" type="button" title="Fit all (0)">Fit all</button>
         </div>
         <div id="banner" role="status" hidden></div>
         <div id="tooltip" role="tooltip" hidden></div>
+        <div id="zone-menu" role="menu" hidden>
+          <div class="zone-menu-title"></div>
+          <button type="button" role="menuitem" data-action="remove">Remove from station</button>
+        </div>
       </div>
       <aside id="panel"></aside>
     </div>

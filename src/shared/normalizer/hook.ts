@@ -97,9 +97,15 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
       return make('session_start', `${sessionId}:session:start:${receivedAt}`);
     case 'SessionEnd':
       return make('session_end', genericId('session_end'));
-    case 'UserPromptSubmit':
-      // Never carry the prompt text.
-      return make('user_prompt', genericId('user_prompt'));
+    case 'UserPromptSubmit': {
+      // Never carry the prompt text. `prompt_id` matches the transcript's `promptId`, so the
+      // hook and transcript backfill dedupe to one prompt.
+      const promptId = str(p, 'prompt_id');
+      return make(
+        'user_prompt',
+        promptId ? `${sessionId}:prompt:${promptId}` : genericId('user_prompt'),
+      );
+    }
     case 'PreToolUse': {
       if (!toolName) return [];
       const t = tool();

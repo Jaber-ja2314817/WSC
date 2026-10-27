@@ -130,7 +130,7 @@ describe('launch.mjs with the app not running', () => {
     async () => {
       const marker = join(dir, 'started.txt');
       const fakeApp = join(dir, 'fake-wsc');
-      writeFileSync(fakeApp, `#!/bin/sh\necho "$@" > "${marker}"\nsleep 5\n`);
+      writeFileSync(fakeApp, `#!/bin/sh\necho "$@" > "${marker}"\nsleep 10\n`);
       chmodSync(fakeApp, 0o755);
       const r = await run(['demo'], { ...notRunning(), WSC_APP_PATH: fakeApp });
       expect(oneLine(r)).toBe('WSC: starting the station in demo mode…');
@@ -138,9 +138,35 @@ describe('launch.mjs with the app not running', () => {
       expect(r.ms).toBeLessThan(2_000);
       await expect
         .poll(() => (existsSync(marker) ? readFileSync(marker, 'utf8').trim() : ''), {
-          timeout: 3_000,
+          // Generous: spawning is slow when the whole suite runs in parallel.
+          timeout: 8_000,
         })
         .toBe('--demo');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'prefers launch.json written by the app over the install locations',
+    async () => {
+      const marker = join(dir, 'started.txt');
+      const fakeApp = join(dir, 'fake-wsc');
+      writeFileSync(fakeApp, `#!/bin/sh\necho "$@" > "${marker}"\n`);
+      chmodSync(fakeApp, 0o755);
+      writeFileSync(
+        join(dir, 'launch.json'),
+        JSON.stringify({ version: '0.1.0', command: fakeApp, args: ['/home/user/wsc'] }),
+      );
+      // WSC_RUNTIME_FILE puts the app folder (and so launch.json) in the temp dir.
+      const r = await run(['compact'], {
+        WSC_RUNTIME_FILE: join(dir, 'runtime.json'),
+        WSC_APP_PATH: '',
+      });
+      expect(oneLine(r)).toBe('WSC: starting the station in compact mode…');
+      await expect
+        .poll(() => (existsSync(marker) ? readFileSync(marker, 'utf8').trim() : ''), {
+          timeout: 3_000,
+        })
+        .toBe('/home/user/wsc --compact');
     },
   );
 });

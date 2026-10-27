@@ -19,6 +19,49 @@ Start with `/station status` in Claude Code. It tells you whether the app is run
 - **Port in use:** WSC prefers `47821`. If something else holds that port, it picks a free one and writes it to the runtime file, and the hooks follow automatically. You can set a different preferred port in Settings; it applies on the next launch.
 - **Firewall or VPN software:** some security tools block even `127.0.0.1` traffic. Allow WSC and Node on localhost.
 
+## Port in use
+
+WSC prefers port `47821` on `127.0.0.1`. If another program holds it, WSC picks a free port and writes it to `runtime.json`; the hooks read that file on every event, so nothing else needs changing. To find out who holds the port:
+
+```sh
+lsof -nP -iTCP:47821 -sTCP:LISTEN        # macOS / Linux
+netstat -ano | findstr 47821             # Windows
+```
+
+You can change the preferred port in Settings. It applies on the next launch.
+
+## Hooks don't fire
+
+- **Plugin edits apply to new sessions.** Installed from a local folder (`/plugin marketplace add ./path/to/wsc`), Claude Code reads `plugin/` straight from that folder: edits take effect at the next session start or after `/reload-plugins` (verified on 2.1.308). Installed from GitHub, it runs from a cache copy in `~/.claude/plugins/cache/…`: run `claude plugin marketplace update wsc && claude plugin update wsc@wsc`, then start a new session.
+- **Check what is registered:** type `/hooks` in Claude Code. Every WSC event should list `node …/hooks/forward.mjs`.
+- **`disableAllHooks`:** `"disableAllHooks": true` in any settings file (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json` or managed settings) turns off every hook, WSC's included.
+- **Without the plugin:** run `npm run hooks:install` in a WSC checkout. It merges the same hooks into `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`; pass `-- --settings <path>` for another file), keeps every other setting and hook, and writes a `settings.json.wsc-backup-YYYYMMDD-HHMMSS` copy first. `npm run hooks:uninstall` removes only the WSC entries: hook handlers whose command or arguments point at a `plugin/hooks/forward.mjs` file.
+
+## Stale runtime or lock files
+
+WSC keeps a few small files in its app folder (`~/Library/Application Support/WSC` on macOS, `%APPDATA%\WSC` on Windows, `~/.config/WSC` on Linux):
+
+| File              | Written by                                          | If it is stale                                                                                                                                                          |
+| ----------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime.json`    | the app while it runs (`port`, `token`, `pid`)      | Left behind by a crash. Harmless: the hook finds nothing listening and, on `SessionStart`, starts the app, which rewrites the file. Safe to delete while WSC is closed. |
+| `launching.json`  | the `SessionStart` hook, right before it starts WSC | Blocks further auto-launches for 15 s so parallel sessions start the app only once. Older markers are ignored and replaced. Safe to delete.                             |
+| `launch.json`     | the app on every start (how to start it again)      | Points at a moved or deleted app: the hook ignores it. Start WSC once by hand to rewrite it.                                                                            |
+| `hook-errors.log` | the hook, only when an auto-launch fails            | One line per failure (time and error code, never event contents), capped at 64 KB. Safe to delete.                                                                      |
+
+## WSC doesn't start when a session starts
+
+When WSC isn't running, the `SessionStart` hook starts it in the background (the terminal keeps focus) and hands it the new session so it shows up right away.
+
+- **Start WSC once by hand.** The hook finds the app through `launch.json`, which the app writes when it starts. Without it the hook falls back to the usual install locations (`/Applications/WSC.app`, `%LOCALAPPDATA%\Programs\WSC`, `~/Applications/WSC*.AppImage`, `wsc` on `PATH`) and `WSC_APP_PATH`.
+- **Read `hook-errors.log`** in the app folder (table above). `autolaunch: app not found` means none of the above pointed at an existing app.
+- **Is it turned off?** `WSC_AUTOLAUNCH=0` in the environment Claude Code runs in disables it, and so does turning off the launch-on-session-start setting (`launchOnSessionStart: false` in the app folder's `settings.json`). The focus-on-session-start setting (`focusOnSessionStart`) brings the window to the front instead of opening it in the background.
+- **Just started another session?** A launch within the last 15 s blocks new ones (`launching.json`).
+- Only new sessions trigger it, and only when the plugin's or installed hooks run (see [Hooks don't fire](#hooks-dont-fire)).
+
+## Every event shows up twice
+
+Claude Code runs plugin hooks and `settings.json` hooks separately, so having both the **wsc** plugin enabled and hooks installed with `npm run hooks:install` (or pasted from the first-run screen) sends each event twice. WSC drops most exact duplicates, but keep only one: either disable the plugin, or run `npm run hooks:uninstall`. The installer refuses to install while `enabledPlugins["wsc@wsc"]` is `true` in the same file, unless you pass `--force`.
+
 ## Agents show up on the wrong project
 
 - Projects are grouped by the folder Claude Code **was started in**, taken from the hook's `cwd`. Starting Claude Code in a subfolder creates a separate zone for that subfolder.

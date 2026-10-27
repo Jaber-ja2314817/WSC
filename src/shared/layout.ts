@@ -16,6 +16,7 @@ import {
   type TilePos,
   type ZoneLayout,
 } from './layoutTypes';
+import type { StationSnapshot } from './types';
 
 // ---- Center geometry (local coords inside the center rect) ----
 const CENTER_W = 22;
@@ -269,6 +270,29 @@ const zoneBox = (z: ZoneLayout): Rect => ({
   w: z.rect.w,
   h: z.rect.h + 1,
 });
+
+/**
+ * Only the facts that change the layout; anything else must not trigger a rebuild.
+ * A zone counts only crew that still need a seat: finished agents stay in the snapshot but have
+ * left their desks, so they never add space while free seats remain.
+ */
+export function layoutInputFor(snap: StationSnapshot, loungeSize: number): LayoutInput {
+  const agentCount = new Map<string, number>();
+  for (const a of Object.values(snap.agents)) {
+    if (a.isOrchestrator || a.status === 'done') continue;
+    agentCount.set(a.projectId, (agentCount.get(a.projectId) ?? 0) + 1);
+  }
+  const projects = Object.values(snap.projects)
+    .sort((a, b) => a.order - b.order)
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      order: p.order,
+      agentCount: agentCount.get(p.id) ?? 0,
+    }));
+  const active = Object.values(snap.sessions).filter((s) => s.endedAt === undefined).length;
+  return { projects, orchestratorSeats: Math.max(1, active), loungeSize };
+}
 
 export function computeLayout(input: LayoutInput): StationLayout {
   const { center, w: cw, h: ch } = buildCenter(input.orchestratorSeats, input.loungeSize);

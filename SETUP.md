@@ -114,6 +114,8 @@ Run something multi-agent in Claude Code. For example: _"Use two subagents in pa
 
 If you don't use plugins, add the hooks yourself.
 
+**From a checkout, the quick way:** `npm run hooks:install` merges them into `~/.claude/settings.json` for you (backup first, idempotent, existing hooks kept); `npm run hooks:uninstall` removes only WSC's entries. It refuses while the `wsc@wsc` plugin is enabled, since both copies of each hook would fire. By hand:
+
 1. Get the files.
    - Clone the repo: `git clone https://github.com/OWNER/wsc`
    - Or use the copy inside the app:
@@ -384,12 +386,12 @@ More in [docs/troubleshooting.md](docs/troubleshooting.md).
 ## 10. Uninstall
 
 1. **Plugin:** run `/plugin uninstall wsc@wsc`, then `/plugin marketplace remove wsc`.
-2. **Manual hooks:** if you added them, remove the forwarder entries from the `"hooks"` key in `~/.claude/settings.json`.
+2. **Manual hooks:** if you added them, run `npm run hooks:uninstall` in the checkout, or remove the forwarder entries from the `"hooks"` key in `~/.claude/settings.json`.
 3. **App:**
    - macOS: delete `/Applications/WSC.app`.
    - Windows: **Settings → Apps → WSC → Uninstall**.
    - Linux: delete the AppImage.
-4. **App data:** this folder holds `settings.json`, `state.json`, `runtime.json` and `themes/`.
+4. **App data:** this folder holds `settings.json`, `window-state.json`, `state.json`, `runtime.json`, `launch.json`, `launching.json`, `hook-errors.log` (if an auto-launch failed) and `themes/`.
    - macOS: `rm -rf ~/Library/Application\ Support/WSC`
    - Windows: delete `%APPDATA%\WSC`
    - Linux: `rm -rf ~/.config/WSC`

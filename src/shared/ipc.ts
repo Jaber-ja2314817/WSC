@@ -1,4 +1,5 @@
 // IPC channel names and the API the preload exposes to the renderer.
+import type { DashboardSnapshot, TimelineStep } from './dashboardTypes';
 import type { Settings } from './settings';
 import type { StationSnapshot } from './types';
 
@@ -19,12 +20,17 @@ export const IPC = {
   setSettings: 'wsc:set-settings',
   settings: 'wsc:settings',
   clearIdleProjects: 'wsc:clear-idle-projects',
+  removeProject: 'wsc:remove-project',
   getWindowMode: 'wsc:get-window-mode',
   setWindowMode: 'wsc:set-window-mode',
   windowMode: 'wsc:window-mode',
   getCamera: 'wsc:get-camera',
   saveCamera: 'wsc:save-camera',
   reportThemes: 'wsc:report-themes',
+  dashboard: 'wsc:dashboard',
+  getDashboard: 'wsc:get-dashboard',
+  getTimeline: 'wsc:get-timeline',
+  visibility: 'wsc:visibility',
 } as const;
 
 export type WindowMode = 'normal' | 'compact';
@@ -99,6 +105,8 @@ export interface WscApi {
   setSettings(patch: Partial<Settings>): Promise<Settings>;
   onSettings(cb: (settings: Settings) => void): () => void;
   clearIdleProjects(): Promise<void>;
+  /** Remove a project zone; new activity in that folder brings it back. */
+  removeProject(projectId: string): Promise<void>;
   getWindowMode(): Promise<WindowMode>;
   setWindowMode(mode: WindowMode | 'toggle'): Promise<void>;
   onWindowMode(cb: (mode: WindowMode) => void): () => void;
@@ -106,4 +114,11 @@ export interface WscApi {
   saveCamera(mode: WindowMode, camera: CameraState): Promise<void>;
   /** Renderer → main: the themes it can load (built-in + user), for the tray menu. */
   reportThemes(themes: { id: string; name: string }[]): void;
+  getDashboard(): Promise<DashboardSnapshot | null>;
+  /** Pushed at most every 500 ms when something changed, and every 5 s for timers. */
+  onDashboard(cb: (dash: DashboardSnapshot) => void): () => void;
+  /** Newest first, capped at 300 steps. Empty for unknown sessions. */
+  getTimeline(sessionId: string): Promise<TimelineStep[]>;
+  /** Renderer → main: the window became visible/hidden. Hidden: main pushes nothing. */
+  setVisible(visible: boolean): void;
 }

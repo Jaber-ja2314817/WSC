@@ -155,7 +155,13 @@ describe('backfillTranscript', () => {
       onEvents: (e) => events.push(...e),
     });
     expect(r).toEqual({ sessions: 1, agents: 0 });
-    expect(events.map((e) => e.kind)).toEqual(['session_start', 'tool_start', 'tool_end']);
+    // The fixture's typed prompt also yields a user_prompt (never its text).
+    expect(events.map((e) => e.kind)).toEqual([
+      'session_start',
+      'user_prompt',
+      'tool_start',
+      'tool_end',
+    ]);
   });
 
   it('handles a missing transcript', async () => {

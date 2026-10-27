@@ -27,6 +27,16 @@ describe('settings schema', () => {
       sound: false,
       launchAtLogin: false,
       toolCategoryOverrides: {},
+      launchOnSessionStart: true,
+      focusOnSessionStart: false,
+      dashboardOpen: true,
+      lookbackDays: 7,
+      idleMinutes: 10,
+      usageWindowHours: 5,
+      windowTokenLimit: null,
+      weeklyTokenLimit: null,
+      showPromptPreview: false,
+      prices: {},
     });
   });
 
@@ -69,6 +79,39 @@ describe('settings schema', () => {
     });
     expect(s.toolCategoryOverrides).toEqual({ mcp__db__query: 'read', MyTool: 'execute' });
     expect(parseSettings({ toolCategoryOverrides: 'nope' }).toolCategoryOverrides).toEqual({});
+  });
+
+  it('validates prices entry by entry', () => {
+    const good = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 };
+    const s = parseSettings({
+      prices: {
+        'fake-model': good,
+        'fake-other': { ...good, extra: 1 },
+        negative: { ...good, input: -1 },
+        missing: { input: 1, output: 1 },
+        text: 'cheap',
+        '': good,
+      },
+    });
+    expect(s.prices).toEqual({ 'fake-model': good, 'fake-other': good });
+    expect(parseSettings({ prices: [] }).prices).toEqual({});
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`m${i}`, good]));
+    expect(Object.keys(parseSettings({ prices: many }).prices)).toHaveLength(50);
+  });
+
+  it('validates the dashboard fields', () => {
+    const s = parseSettings({
+      idleMinutes: 0,
+      usageWindowHours: 2.5,
+      windowTokenLimit: 1_000_000,
+      weeklyTokenLimit: -5,
+      showPromptPreview: true,
+    });
+    expect(s.idleMinutes).toBe(10);
+    expect(s.usageWindowHours).toBe(2.5);
+    expect(s.windowTokenLimit).toBe(1_000_000);
+    expect(s.weeklyTokenLimit).toBeNull();
+    expect(s.showPromptPreview).toBe(true);
   });
 
   it('merge keeps the current value when a patch field is invalid', () => {

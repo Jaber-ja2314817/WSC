@@ -36,6 +36,14 @@ describe('normalizeHookPayload — event mapping', () => {
     expect(JSON.stringify(e)).not.toContain('secret plan');
   });
 
+  it('UserPromptSubmit uses prompt_id so it dedupes with the transcript prompt', () => {
+    const e = one(hookPayload('UserPromptSubmit', { prompt: 'my secret plan', prompt_id: 'pr-1' }));
+    expect(e.id).toBe(`${SESSION_A}:prompt:pr-1`);
+    expect(JSON.stringify(e)).not.toContain('secret plan');
+    const generic = one(hookPayload('UserPromptSubmit', { prompt: 'x', prompt_id: '' }));
+    expect(generic.id).toBe(`${SESSION_A}:${ORCHESTRATOR_ID}:user_prompt:${T}`);
+  });
+
   it('PreToolUse → tool_start with sanitized summary', () => {
     const e = one(
       toolPayload('PreToolUse', 'Read', { file_path: '/home/user/projects/alpha/src/auth.ts' }),

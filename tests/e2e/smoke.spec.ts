@@ -27,6 +27,9 @@ test('app launches and renders the station canvas', async () => {
   await expect(win.locator('#stage canvas')).toBeVisible({ timeout: 15_000 });
   await expect(win.locator('#panel')).not.toBeEmpty();
   await expect(win.locator('#fit-all')).toBeVisible();
+  // Dashboard column (expanded or as its collapsed rail) renders without errors.
+  await expect(win.locator('#dashboard')).toBeVisible();
+  await expect(win.locator('#dashboard')).not.toBeEmpty();
   await win.screenshot({ path: 'test-results/smoke.png' });
   expect(errors).toEqual([]);
   await app.close();

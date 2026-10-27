@@ -19,9 +19,9 @@ import type { BubbleView, CrewView, DirectorFrame, ZoneStatusView } from '../dir
 import type { ThemeRuntime } from '../themes/types';
 import { Camera, type View } from './Camera';
 import { formatElapsed, stackBoxes, truncateLabel, zoneSummary, type Box } from './format';
+import { BUBBLE_FADE_MS } from './pacing';
 
 const UNFOLD_MS = 600;
-const BUBBLE_FADE_MS = 400;
 
 interface CrewNode {
   sprite: AnimatedSprite;
@@ -58,6 +58,8 @@ export interface SceneCallbacks {
   onSelect?: (agentKey: string | undefined) => void;
   onHover?: (crew: CrewView | null, screenX: number, screenY: number) => void;
   onZoneClick?: (projectId: string) => void;
+  /** Right-click on a zone; screen coords are relative to the canvas. */
+  onZoneContextMenu?: (projectId: string, screenX: number, screenY: number) => void;
 }
 
 const isCrewWorking = (s: AgentStatus): boolean => s === 'working';
@@ -127,8 +129,9 @@ export class StationScene {
   }
 
   setLayout(layout: StationLayout): void {
-    const known = new Set(this.zones.keys());
     const prev = this.layout;
+    // The first layout appears as is; later ones unfold only the zones that are new.
+    const known = new Set(prev ? this.zones.keys() : layout.zones.map((z) => z.projectId));
     this.layout = layout;
     this.build(layout, known);
     // computeLayout may translate the whole grid when zones are added or grow; positions relative
@@ -189,6 +192,15 @@ export class StationScene {
     this.renderPath(frame.crew);
   }
 
+  /** Camera moving or a zone unfolding (the frame pacer keeps the smooth rate). */
+  isBusy(now: number): boolean {
+    if (this.camera.busy) return true;
+    for (const z of this.zones.values()) {
+      if (z.appearedAt && now - z.appearedAt < UNFOLD_MS) return true;
+    }
+    return false;
+  }
+
   destroy(): void {
     this.detachInput?.();
     this.camera.destroy();
@@ -201,7 +213,7 @@ export class StationScene {
     const theme = this.theme;
     if (!theme) return;
     const T = theme.tileSize;
-    const now = performance.now();
+    const now = Date.now(); // same clock as render(): zones unfold from here
 
     // Clear static content (crew stay; they're re-sorted into actors below).
     destroyChildren(this.baseFloor);
@@ -749,7 +761,7 @@ export class StationScene {
   }
 
   private attachPointer(canvas: HTMLCanvasElement): () => void {
-    const local = (e: PointerEvent): { x: number; y: number } => {
+    const local = (e: MouseEvent): { x: number; y: number } => {
       const r = canvas.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
@@ -764,7 +776,13 @@ export class StationScene {
       this.hovered = undefined;
       this.cb.onHover?.(null, 0, 0);
     };
+    const zoneAt = (x: number, y: number): ZoneLayout | undefined => {
+      const w = this.camera.toWorld(x, y);
+      const T = this.tile;
+      return this.layout?.zones.find((zz) => inRect(zz.rect, w.x / T, w.y / T));
+    };
     const onUp = (e: PointerEvent): void => {
+      if (e.button !== 0) return;
       // Defer one tick so Camera's pointerup (window listener) has set `dragged`.
       setTimeout(() => {
         if (this.camera.dragged) return;
@@ -774,17 +792,23 @@ export class StationScene {
           this.cb.onSelect?.(v.agentKey);
           return;
         }
-        const w = this.camera.toWorld(p.x, p.y);
-        const T = this.tile;
-        const z = this.layout?.zones.find((zz) => inRect(zz.rect, w.x / T, w.y / T));
+        const z = zoneAt(p.x, p.y);
         if (z) this.cb.onZoneClick?.(z.projectId);
         else this.cb.onSelect?.(undefined);
       }, 0);
     };
     canvas.addEventListener('pointermove', onMove);
     canvas.addEventListener('pointerleave', onLeave);
+    const onContextMenu = (e: MouseEvent): void => {
+      e.preventDefault();
+      const p = local(e);
+      const z = zoneAt(p.x, p.y);
+      if (z) this.cb.onZoneContextMenu?.(z.projectId, p.x, p.y);
+    };
     canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('contextmenu', onContextMenu);
     return () => {
+      canvas.removeEventListener('contextmenu', onContextMenu);
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerleave', onLeave);
       canvas.removeEventListener('pointerup', onUp);

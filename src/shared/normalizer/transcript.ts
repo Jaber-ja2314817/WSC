@@ -3,8 +3,11 @@
 //   ~/.claude/projects/<sanitized-cwd>/<sessionId>.jsonl                  — orchestrator
 //   ~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/agent-<id>.jsonl (+ .meta.json)
 // Every function here is total: malformed input yields [] and never throws.
+// Lines also yield TranscriptExtras (usage, model, git branch) — never message text, except an
+// opt-in, redacted prompt preview. Verified against Claude Code 2.1.308 (keys only).
+import { rawTokenTotal, type TokenUsage, type TranscriptExtras } from '../dashboardTypes';
 import { projectIdFor, projectNameFor } from '../projects';
-import { summarizeTool } from '../redact';
+import { redactSecrets, summarizeTool } from '../redact';
 import { categorizeTool } from '../toolCategories';
 import { ORCHESTRATOR_ID, type StationEvent, type ToolCategory } from '../types';
 
@@ -19,15 +22,39 @@ export interface TranscriptContext {
   fullToolDetails?: boolean;
   /** tool_use id → tool name, filled on tool_use so tool_end can name the tool. */
   toolNames?: Map<string, string>;
+  /** Attach a redacted, truncated preview of typed prompts to extras. Off by default. */
+  promptPreview?: boolean;
+  /** UsageRecord.rank for this file's usage (its creation time). */
+  usageRank?: number;
+}
+
+export interface TranscriptLineResult {
+  events: StationEvent[];
+  /** Non-event facts (usage, model, branch); null for unparseable or non-message lines. */
+  extras: TranscriptExtras | null;
 }
 
 const DELEGATE_TOOLS = new Set(['Task', 'Agent']);
+/** Line types that belong to the conversation; everything else is bookkeeping and ignored. */
+const MESSAGE_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
+/** Claude Code's model id for locally generated messages (errors, interrupts): no API usage. */
+const SYNTHETIC_MODEL = '<synthetic>';
+export const PROMPT_PREVIEW_MAX = 120;
+/** Project of a usage record whose line (and context) has no cwd. */
+export const UNKNOWN_PROJECT_ID = 'unknown';
+export const UNKNOWN_PROJECT_NAME = 'unknown';
+/** User lines that look typed but are command plumbing, not prompts that start a turn. */
+const NOT_A_PROMPT =
+  /^\s*(?:<(?:command-name|command-message|command-args|local-command-[a-z]+|bash-input|bash-stdout|bash-stderr)>|\[Request interrupted)/;
 
 type Rec = Record<string, unknown>;
 
 const isRec = (v: unknown): v is Rec => typeof v === 'object' && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.length > 0 ? v : undefined;
+/** Token counts: anything but a finite, non-negative number counts as 0. */
+const count = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
 
 export const stripAgentPrefix = (id: string): string =>
   id.startsWith('agent-') ? id.slice('agent-'.length) : id;
@@ -40,32 +67,168 @@ function parseTs(v: unknown): number | undefined {
 }
 
 export function normalizeTranscriptLine(line: string, ctx: TranscriptContext): StationEvent[] {
+  return normalizeTranscriptLineFull(line, ctx).events;
+}
+
+/** Events plus non-event extras for one JSONL line. Total: never throws. */
+export function normalizeTranscriptLineFull(
+  line: string,
+  ctx: TranscriptContext,
+): TranscriptLineResult {
   try {
     return parseLine(line, ctx);
   } catch {
-    return [];
+    return { events: [], extras: null };
   }
 }
 
-function parseLine(line: string, ctx: TranscriptContext): StationEvent[] {
+/**
+ * Fast path for the startup scan of large histories: usage, model and branch only.
+ * A cheap substring prefilter skips JSON.parse for the vast majority of lines.
+ */
+export function transcriptUsageOnly(line: string, ctx: TranscriptContext): TranscriptExtras | null {
+  try {
+    if (typeof line !== 'string') return null;
+    if (!line.includes('"usage"') || !line.includes('"assistant"')) return null;
+    const rec: unknown = JSON.parse(line);
+    if (!isRec(rec) || rec['type'] !== 'assistant') return null;
+    const head = lineHead(rec, ctx);
+    if (!head) return null;
+    const message = rec['message'];
+    if (!isRec(message)) return null;
+    const extras = baseExtras(rec, head);
+    addAssistantFacts(extras, rec, message, head);
+    return extras.usage ? extras : null;
+  } catch {
+    return null;
+  }
+}
+
+interface LineHead {
+  ts: number;
+  sessionId: string;
+  agentId: string;
+  cwd: string | undefined;
+  rank: number | undefined;
+}
+
+function lineHead(rec: Rec, ctx: TranscriptContext): LineHead | undefined {
+  const ts = parseTs(rec['timestamp']);
+  if (ts === undefined) return undefined;
+  const sessionId = str(rec['sessionId']) ?? ctx.sessionId;
+  if (typeof sessionId !== 'string' || !sessionId) return undefined;
+  const lineAgent = str(rec['agentId']);
+  const agentId = lineAgent ? stripAgentPrefix(lineAgent) : ctx.agentId;
+  return { ts, sessionId, agentId, cwd: str(rec['cwd']) ?? ctx.cwd, rank: ctx.usageRank };
+}
+
+function baseExtras(rec: Rec, head: LineHead): TranscriptExtras {
+  const extras: TranscriptExtras = {
+    sessionId: head.sessionId,
+    agentId: head.agentId,
+    ts: head.ts,
+  };
+  if (head.cwd) {
+    extras.projectId = projectIdFor(head.cwd);
+    extras.projectName = projectNameFor(head.cwd);
+  }
+  const branch = str(rec['gitBranch']);
+  if (branch) extras.gitBranch = branch;
+  return extras;
+}
+
+function parseUsage(u: unknown): TokenUsage | undefined {
+  if (!isRec(u)) return undefined;
+  let cacheCreation = count(u['cache_creation_input_tokens']);
+  const detail = u['cache_creation'];
+  if (cacheCreation === 0 && isRec(detail)) {
+    cacheCreation =
+      count(detail['ephemeral_5m_input_tokens']) + count(detail['ephemeral_1h_input_tokens']);
+  }
+  return {
+    input: count(u['input_tokens']),
+    output: count(u['output_tokens']),
+    cacheCreation,
+    cacheRead: count(u['cache_read_input_tokens']),
+  };
+}
+
+/** Model + usage of an assistant line. One API message spans several lines: dedupe by key. */
+function addAssistantFacts(extras: TranscriptExtras, rec: Rec, message: Rec, head: LineHead): void {
+  const model = str(message['model']);
+  if (!model || model === SYNTHETIC_MODEL) return;
+  extras.model = model;
+  const messageId = str(message['id']);
+  const usage = parseUsage(message['usage']);
+  if (!messageId || !usage || rawTokenTotal(usage) === 0) return;
+  const requestId = str(rec['requestId']);
+  extras.usage = {
+    key: requestId ? `${messageId}:${requestId}` : messageId,
+    ts: head.ts,
+    sessionId: head.sessionId,
+    agentId: head.agentId,
+    projectId: extras.projectId ?? UNKNOWN_PROJECT_ID,
+    projectName: extras.projectName ?? UNKNOWN_PROJECT_NAME,
+    model,
+    usage,
+  };
+  if (head.rank !== undefined && Number.isFinite(head.rank)) extras.usage.rank = head.rank;
+}
+
+/** The text of a prompt the user typed, or undefined for meta, system and tool-result lines. */
+function typedPromptText(rec: Rec, message: Rec): string | undefined {
+  if (rec['isMeta'] === true || rec['isCompactSummary'] === true) return undefined;
+  if (rec['promptSource'] === 'system') return undefined;
+  const content = message['content'];
+  let text: string;
+  if (typeof content === 'string') {
+    text = content;
+  } else if (Array.isArray(content) && content.length > 0) {
+    const parts: string[] = [];
+    for (const item of content) {
+      if (!isRec(item) || item['type'] !== 'text' || typeof item['text'] !== 'string') {
+        return undefined;
+      }
+      parts.push(item['text']);
+    }
+    text = parts.join('\n');
+  } else {
+    return undefined;
+  }
+  if (!text.trim() || NOT_A_PROMPT.test(text)) return undefined;
+  return text;
+}
+
+/** Redacted, single-line, at most PROMPT_PREVIEW_MAX chars. */
+export function promptPreviewOf(text: string): string {
+  const oneLine = redactSecrets(text).replace(/\s+/g, ' ').trim();
+  return oneLine.length > PROMPT_PREVIEW_MAX
+    ? `${oneLine.slice(0, PROMPT_PREVIEW_MAX - 1)}…`
+    : oneLine;
+}
+
+function parseLine(line: string, ctx: TranscriptContext): TranscriptLineResult {
+  const none: TranscriptLineResult = { events: [], extras: null };
+  if (typeof line !== 'string') return none;
   const trimmed = line.trim();
-  if (!trimmed) return [];
+  if (!trimmed) return none;
   let rec: unknown;
   try {
     rec = JSON.parse(trimmed);
   } catch {
-    return [];
+    return none;
   }
-  if (!isRec(rec)) return [];
+  if (!isRec(rec)) return none;
+  const type = rec['type'];
+  if (typeof type !== 'string' || !MESSAGE_TYPES.has(type)) return none;
 
-  const ts = parseTs(rec['timestamp']);
-  if (ts === undefined) return [];
-
-  const sessionId = str(rec['sessionId']) ?? ctx.sessionId;
-  const lineAgent = str(rec['agentId']);
-  const agentId = lineAgent ? stripAgentPrefix(lineAgent) : ctx.agentId;
-  const cwd = str(rec['cwd']) ?? ctx.cwd;
-  if (!cwd) return [];
+  const head = lineHead(rec, ctx);
+  if (!head) return none;
+  const { ts, sessionId, agentId, cwd } = head;
+  const extras = baseExtras(rec, head);
+  const message = rec['message'];
+  if (type === 'assistant' && isRec(message)) addAssistantFacts(extras, rec, message, head);
+  if (!cwd) return { events: [], extras };
 
   const base = {
     ts,
@@ -77,17 +240,33 @@ function parseLine(line: string, ctx: TranscriptContext): StationEvent[] {
     ...(agentId !== ORCHESTRATOR_ID ? { parentAgentId: ORCHESTRATOR_ID } : {}),
   };
 
-  const type = rec['type'];
   if (type === 'system') {
-    if (rec['subtype'] !== 'compact_boundary') return [];
+    if (rec['subtype'] !== 'compact_boundary') return { events: [], extras };
     const uuid = str(rec['uuid']) ?? String(ts);
-    return [{ ...base, id: `${sessionId}:compact:${uuid}`, kind: 'compacting' }];
+    return {
+      events: [{ ...base, id: `${sessionId}:compact:${uuid}`, kind: 'compacting' }],
+      extras,
+    };
   }
 
-  const message = rec['message'];
-  if (!isRec(message) || !Array.isArray(message['content'])) return [];
-  const content = message['content'] as unknown[];
+  if (!isRec(message)) return { events: [], extras };
   const out: StationEvent[] = [];
+
+  if (type === 'user') {
+    const prompt = typedPromptText(rec, message);
+    if (prompt !== undefined && agentId === ORCHESTRATOR_ID) {
+      const key = str(rec['promptId']) ?? str(rec['uuid']) ?? String(ts);
+      // Never carry the prompt text in the event.
+      out.push({ ...base, id: `${sessionId}:prompt:${key}`, kind: 'user_prompt' });
+      if (ctx.promptPreview === true) {
+        const preview = promptPreviewOf(prompt);
+        if (preview) extras.promptPreview = preview;
+      }
+    }
+  }
+
+  if (!Array.isArray(message['content'])) return { events: out, extras };
+  const content = message['content'] as unknown[];
 
   if (type === 'assistant') {
     for (const item of content) {
@@ -143,7 +322,7 @@ function parseLine(line: string, ctx: TranscriptContext): StationEvent[] {
       });
     }
   }
-  return out;
+  return { events: out, extras };
 }
 
 /** Subagent `agent-<id>.meta.json` → agent_spawn. */

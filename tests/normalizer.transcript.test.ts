@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
+  PROMPT_PREVIEW_MAX,
   firstCwd,
   metaToolUseId,
   normalizeSubagentMeta,
   normalizeTranscriptLine,
+  normalizeTranscriptLineFull,
+  transcriptUsageOnly,
   type TranscriptContext,
 } from '../src/shared/normalizer/transcript';
 import { projectIdFor } from '../src/shared/projects';
@@ -157,7 +162,20 @@ describe('normalizeTranscriptLine', () => {
         ctx(),
       ),
     ).toEqual([]);
-    expect(normalizeTranscriptLine(user('a plain prompt'), ctx())).toEqual([]);
+    expect(normalizeTranscriptLine(line({ type: 'attachment', attachment: {} }), ctx())).toEqual(
+      [],
+    );
+  });
+
+  it('turns a typed prompt into user_prompt without its text', () => {
+    const evs = normalizeTranscriptLine(user('a plain prompt'), ctx());
+    expect(evs).toEqual([
+      expect.objectContaining({ kind: 'user_prompt', id: `${SESSION}:prompt:u1` }),
+    ]);
+    expect(JSON.stringify(evs)).not.toContain('plain prompt');
+  });
+
+  it('ignores attachments', () => {
     expect(normalizeTranscriptLine(line({ type: 'attachment', attachment: {} }), ctx())).toEqual(
       [],
     );
@@ -243,5 +261,296 @@ describe('firstCwd', () => {
       firstCwd(['{bad', JSON.stringify({ x: 1 }), JSON.stringify({ cwd: '/home/user/x' })]),
     ).toBe('/home/user/x');
     expect(firstCwd(['{bad'])).toBeUndefined();
+  });
+});
+
+const USAGE = {
+  input_tokens: 10,
+  output_tokens: 20,
+  cache_creation_input_tokens: 300,
+  cache_read_input_tokens: 4000,
+  cache_creation: { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 0 },
+  service_tier: 'standard',
+};
+
+const assistantMsg = (
+  over: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+): string =>
+  line({
+    type: 'assistant',
+    requestId: 'req_fake_1',
+    gitBranch: 'feature/x',
+    message: {
+      id: 'msg_fake_1',
+      model: 'claude-fake-1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'fake' }],
+      usage: USAGE,
+      ...over,
+    },
+    ...extra,
+  });
+
+describe('normalizeTranscriptLineFull — extras', () => {
+  it('extracts usage, model, branch and project from an assistant line', () => {
+    const { events, extras } = normalizeTranscriptLineFull(assistantMsg(), ctx());
+    expect(events).toEqual([]);
+    expect(extras).toEqual({
+      sessionId: SESSION,
+      agentId: ORCHESTRATOR_ID,
+      ts: Date.parse(TS),
+      projectId: projectIdFor(CWD),
+      projectName: 'proj-a',
+      gitBranch: 'feature/x',
+      model: 'claude-fake-1',
+      usage: {
+        key: 'msg_fake_1:req_fake_1',
+        ts: Date.parse(TS),
+        sessionId: SESSION,
+        agentId: ORCHESTRATOR_ID,
+        projectId: projectIdFor(CWD),
+        projectName: 'proj-a',
+        model: 'claude-fake-1',
+        usage: { input: 10, output: 20, cacheCreation: 300, cacheRead: 4000 },
+      },
+    });
+  });
+
+  it('gives repeated content-block lines of one message the same dedupe key', () => {
+    const a = normalizeTranscriptLineFull(assistantMsg(), ctx()).extras?.usage?.key;
+    const b = normalizeTranscriptLineFull(
+      assistantMsg({ content: [{ type: 'tool_use', id: 't9', name: 'Read', input: {} }] }),
+      ctx(),
+    ).extras?.usage?.key;
+    expect(a).toBe('msg_fake_1:req_fake_1');
+    expect(b).toBe(a);
+  });
+
+  it('keys by message id alone without requestId, and skips usage without message id', () => {
+    const noReq = normalizeTranscriptLineFull(assistantMsg({}, { requestId: undefined }), ctx());
+    expect(noReq.extras?.usage?.key).toBe('msg_fake_1');
+    const noId = normalizeTranscriptLineFull(assistantMsg({ id: undefined }), ctx());
+    expect(noId.extras?.usage).toBeUndefined();
+    expect(noId.extras?.model).toBe('claude-fake-1');
+  });
+
+  it("stamps usage with the file's rank, on both parse paths", () => {
+    const ranked = { ...ctx(), usageRank: 1234 };
+    expect(normalizeTranscriptLineFull(assistantMsg({}), ranked).extras?.usage?.rank).toBe(1234);
+    expect(transcriptUsageOnly(assistantMsg({}), ranked)?.usage?.rank).toBe(1234);
+    expect(normalizeTranscriptLineFull(assistantMsg({}), ctx()).extras?.usage).not.toHaveProperty(
+      'rank',
+    );
+  });
+
+  it('treats missing, negative and non-numeric token counts as 0', () => {
+    const { extras } = normalizeTranscriptLineFull(
+      assistantMsg({ usage: { input_tokens: -5, output_tokens: 'x', cache_read_input_tokens: 7 } }),
+      ctx(),
+    );
+    expect(extras?.usage?.usage).toEqual({ input: 0, output: 0, cacheCreation: 0, cacheRead: 7 });
+    const fromDetail = normalizeTranscriptLineFull(
+      assistantMsg({
+        usage: { output_tokens: 1, cache_creation: { ephemeral_1h_input_tokens: 9 } },
+      }),
+      ctx(),
+    );
+    expect(fromDetail.extras?.usage?.usage.cacheCreation).toBe(9);
+    const none = normalizeTranscriptLineFull(assistantMsg({ usage: 'garbage' }), ctx());
+    expect(none.extras?.usage).toBeUndefined();
+  });
+
+  it('ignores synthetic and all-zero usage', () => {
+    const syn = normalizeTranscriptLineFull(assistantMsg({ model: '<synthetic>' }), ctx());
+    expect(syn.extras?.model).toBeUndefined();
+    expect(syn.extras?.usage).toBeUndefined();
+    const zero = normalizeTranscriptLineFull(assistantMsg({ usage: { input_tokens: 0 } }), ctx());
+    expect(zero.extras?.usage).toBeUndefined();
+  });
+
+  it('attributes subagent usage to the parent session', () => {
+    const { extras } = normalizeTranscriptLineFull(
+      assistantMsg({}, { agentId: 'agent-sub1', isSidechain: true }),
+      ctx(),
+    );
+    expect(extras?.usage).toMatchObject({ sessionId: SESSION, agentId: 'sub1' });
+  });
+
+  it('still returns extras (without project) when no cwd is known', () => {
+    const l = JSON.stringify({
+      type: 'assistant',
+      timestamp: TS,
+      sessionId: SESSION,
+      message: { id: 'm', model: 'claude-fake-1', content: [], usage: USAGE },
+    });
+    const { events, extras } = normalizeTranscriptLineFull(l, ctx({ cwd: undefined }));
+    expect(events).toEqual([]);
+    expect(extras?.projectId).toBeUndefined();
+    expect(extras?.usage?.projectId).toBe('unknown');
+  });
+
+  it.each([
+    'mode',
+    'permission-mode',
+    'file-history-snapshot',
+    'file-history-delta',
+    'last-prompt',
+    'api-request',
+    'api-request-shape',
+    'api-request-blob',
+    'ai-title',
+    'queue-operation',
+    'cost-state',
+    'atis-latch',
+    'brand-new-type',
+  ])('silently ignores %s lines', (type) => {
+    const l = line({ type, message: { id: 'm', model: 'x', content: [], usage: USAGE } });
+    expect(normalizeTranscriptLineFull(l, ctx())).toEqual({ events: [], extras: null });
+  });
+
+  it.each([
+    '',
+    '{"type": "assistant", "timestamp": "2026-01-01T10:00:00.000Z", "message": {"id": "msg_tr',
+    '{not json',
+    'null',
+    '[]',
+    JSON.stringify({ type: 'assistant', timestamp: 'nope', message: {} }),
+  ])('is total on malformed line %#', (l) => {
+    expect(normalizeTranscriptLineFull(l, ctx())).toEqual({ events: [], extras: null });
+    expect(transcriptUsageOnly(l, ctx())).toBeNull();
+  });
+
+  it('reads gitBranch from user, system and attachment lines too', () => {
+    for (const type of ['user', 'system', 'attachment']) {
+      const { extras } = normalizeTranscriptLineFull(
+        line({ type, gitBranch: 'dev', message: { role: 'user', content: [] } }),
+        ctx(),
+      );
+      expect(extras?.gitBranch).toBe('dev');
+    }
+  });
+});
+
+describe('typed prompts', () => {
+  const prompt = (content: unknown, extra: Record<string, unknown> = {}): string =>
+    user(content, { promptId: 'pr-1', ...extra });
+  const kinds = (l: string, c = ctx()): string[] =>
+    normalizeTranscriptLine(l, c).map((e) => e.kind);
+
+  it('uses promptId for the event id so hook and transcript dedupe', () => {
+    const [ev] = normalizeTranscriptLine(prompt('hello', { promptSource: 'typed' }), ctx());
+    expect(ev).toMatchObject({ kind: 'user_prompt', id: `${SESSION}:prompt:pr-1` });
+  });
+
+  it('accepts string content and text-only block arrays', () => {
+    expect(kinds(prompt('hello'))).toEqual(['user_prompt']);
+    expect(
+      kinds(
+        prompt([
+          { type: 'text', text: 'a' },
+          { type: 'text', text: 'b' },
+        ]),
+      ),
+    ).toEqual(['user_prompt']);
+  });
+
+  it('rejects meta, system, tool_result, mixed, empty and command lines', () => {
+    expect(kinds(prompt('x', { isMeta: true }))).toEqual([]);
+    expect(kinds(prompt('x', { promptSource: 'system' }))).toEqual([]);
+    expect(kinds(prompt([{ type: 'tool_result', tool_use_id: 't1' }]))).toEqual(['tool_end']);
+    expect(
+      kinds(
+        prompt([
+          { type: 'text', text: 'x' },
+          { type: 'tool_result', tool_use_id: 't2' },
+        ]),
+      ),
+    ).toEqual(['tool_end']);
+    expect(kinds(prompt([{ type: 'text', text: 'x' }, { type: 'image' }]))).toEqual([]);
+    expect(kinds(prompt('   '))).toEqual([]);
+    expect(kinds(prompt([]))).toEqual([]);
+    expect(kinds(prompt('<command-name>/model</command-name>'))).toEqual([]);
+    expect(kinds(prompt('<local-command-stdout>fake</local-command-stdout>'))).toEqual([]);
+    expect(kinds(prompt([{ type: 'text', text: '[Request interrupted by user]' }]))).toEqual([]);
+  });
+
+  it('only counts orchestrator prompts (a subagent task prompt is not the user typing)', () => {
+    expect(kinds(prompt('do the thing', { agentId: 'agent-s1' }))).toEqual([]);
+    expect(kinds(prompt('do the thing'), ctx({ agentId: 's1' }))).toEqual([]);
+  });
+
+  it('attaches no preview by default', () => {
+    const { extras } = normalizeTranscriptLineFull(prompt('my plan'), ctx());
+    expect(extras?.promptPreview).toBeUndefined();
+    expect(JSON.stringify(extras)).not.toContain('my plan');
+  });
+
+  it('previews are redacted, collapsed and truncated when opted in', () => {
+    const text = `Use   api_key=FAKEKEY123456 and\n\n sk-fakefakefake123 then ${'word '.repeat(60)}`;
+    const { events, extras } = normalizeTranscriptLineFull(
+      prompt(text),
+      ctx({ promptPreview: true }),
+    );
+    const pv = extras?.promptPreview ?? '';
+    expect(pv.startsWith('Use api_key=••• and ••• then word')).toBe(true);
+    expect(pv).not.toContain('FAKEKEY123456');
+    expect(pv).not.toContain('sk-fakefakefake123');
+    expect(pv.length).toBe(PROMPT_PREVIEW_MAX);
+    expect(pv.endsWith('…')).toBe(true);
+    expect(JSON.stringify(events)).not.toContain('Use');
+    const short = normalizeTranscriptLineFull(prompt('fix it'), ctx({ promptPreview: true }));
+    expect(short.extras?.promptPreview).toBe('fix it');
+  });
+});
+
+describe('transcriptUsageOnly', () => {
+  it('returns usage, model and branch for assistant lines', () => {
+    const x = transcriptUsageOnly(assistantMsg(), ctx());
+    expect(x).toMatchObject({
+      sessionId: SESSION,
+      model: 'claude-fake-1',
+      gitBranch: 'feature/x',
+      usage: { key: 'msg_fake_1:req_fake_1', usage: { input: 10 } },
+    });
+  });
+
+  it('skips lines without usage, non-assistant lines and prompts', () => {
+    expect(transcriptUsageOnly(user('the usage of "assistant" words'), ctx())).toBeNull();
+    expect(transcriptUsageOnly(assistant([{ type: 'text', text: 'x' }]), ctx())).toBeNull();
+    expect(transcriptUsageOnly(line({ type: 'cost-state', usage: 1 }), ctx())).toBeNull();
+  });
+});
+
+describe('synthetic dashboard fixture', () => {
+  const file = join(import.meta.dirname, 'fixtures', 'transcripts', '_dashboard');
+  const lines = readFileSync(join(file, 'dashboard-session.ndjson'), 'utf8').split('\n');
+  const c = ctx({ sessionId: 'unused', cwd: undefined, promptPreview: false });
+
+  it('yields one prompt, one usage per API message and no secrets', () => {
+    const results = lines.map((l) => normalizeTranscriptLineFull(l, c));
+    const events = results.flatMap((r) => r.events);
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'tool_start',
+      'tool_end',
+      'idle',
+      'idle',
+    ]);
+    expect(events[0]?.id).toBe('44444444-4444-4444-8444-444444444444:prompt:prompt-0001');
+    const keys = results.flatMap((r) => (r.extras?.usage ? [r.extras.usage.key] : []));
+    expect(keys).toEqual([
+      'msg_fake_0001:req_fake_0001',
+      'msg_fake_0001:req_fake_0001',
+      'msg_fake_0001:req_fake_0001',
+      'msg_fake_0002:req_fake_0002',
+    ]);
+    expect(new Set(keys).size).toBe(2);
+    const dump = JSON.stringify(results);
+    for (const secret of ['FAKE_SECRET_VALUE_123', 'FAKE_BEARER_abcdef123456', 'Deploy with']) {
+      expect(dump).not.toContain(secret);
+    }
+    const fast = lines.map((l) => transcriptUsageOnly(l, c)).filter((x) => x !== null);
+    expect(fast.map((x) => x.usage?.key)).toEqual(keys);
   });
 });

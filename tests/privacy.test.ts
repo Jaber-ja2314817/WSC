@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { Director } from '../src/renderer/director/director';
 import { makePathfinder } from '../src/shared/astar';
-import { computeLayout } from '../src/shared/layout';
+import { computeLayout, layoutInputFor } from '../src/shared/layout';
 import { normalizeHookPayload } from '../src/shared/normalizer/hook';
 import { normalizeTranscriptLine } from '../src/shared/normalizer/transcript';
 import { StationStore } from '../src/shared/store';
@@ -106,13 +106,7 @@ function directorFrames(events: StationEvent[]): unknown[] {
   for (const e of events) {
     store.apply({ ...e, ts: now });
     const snap = store.snapshot();
-    const projects = Object.values(snap.projects).map((p) => ({
-      id: p.id,
-      name: p.name,
-      order: p.order,
-      agentCount: Object.values(snap.agents).filter((a) => a.projectId === p.id).length,
-    }));
-    const layout = computeLayout({ projects, orchestratorSeats: 1, loungeSize: 6 });
+    const layout = computeLayout({ ...layoutInputFor(snap, 6), orchestratorSeats: 1 });
     director.setLayout(layout, makePathfinder(layout));
     director.setSnapshot(snap, now);
     // Several frames per event: bubbles are rate-limited and appear over time.

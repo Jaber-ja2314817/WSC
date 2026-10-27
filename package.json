@@ -26,7 +26,9 @@
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
     "package:linux": "npm run build && electron-builder --linux",
-    "test:e2e": "electron-vite build && playwright test"
+    "test:e2e": "electron-vite build && playwright test",
+    "hooks:install": "node scripts/install-hooks.mjs install",
+    "hooks:uninstall": "node scripts/install-hooks.mjs uninstall"
   },
   "devDependencies": {
     "@electron-toolkit/tsconfig": "^2.0.0",

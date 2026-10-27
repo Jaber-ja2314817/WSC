@@ -257,6 +257,15 @@ describe('StationStore', () => {
       expect(a?.toolCalls).toBe(1);
     });
 
+    it("the hand-back call's result after agent_finish keeps the subagent done", () => {
+      const handback = tool('SubagentHandback', 'other', { useId: 'toolu_fake_hb' });
+      store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
+      store.apply(ev({ kind: 'tool_start', agentId: 'a1', ts: 2000, tool: handback }));
+      store.apply(ev({ kind: 'agent_finish', agentId: 'a1', ts: 2000 }));
+      store.apply(ev({ kind: 'tool_end', agentId: 'a1', ts: 2050, tool: handback }));
+      expect(sub(store.snapshot(), 'a1')?.status).toBe('done');
+    });
+
     it('a newer event revives a done subagent', () => {
       store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
       store.apply(ev({ kind: 'agent_finish', agentId: 'a1', ts: 2000 }));
@@ -352,6 +361,47 @@ describe('StationStore', () => {
       expect(Object.keys(s.projects)).toEqual(['p2']);
       expect(s.sessions['s1']).toBeUndefined();
       expect(orch(s, 's1')).toBeUndefined();
+    });
+
+    it('removeProject removes the zone and only its sessions and agents', () => {
+      store.apply(ev({ kind: 'session_start', sessionId: 's1', projectId: 'p1', ts: 1000 }));
+      store.apply(
+        ev({ kind: 'agent_spawn', sessionId: 's1', projectId: 'p1', agentId: 'a1', ts: 1100 }),
+      );
+      store.apply(ev({ kind: 'session_start', sessionId: 's2', projectId: 'p2', ts: 1200 }));
+      expect(store.removeProject('p1', 2000)).toBe(true);
+      const s = store.snapshot();
+      expect(Object.keys(s.projects)).toEqual(['p2']);
+      expect(s.sessions['s1']).toBeUndefined();
+      expect(sub(s, 'a1', 's1')).toBeUndefined();
+      expect(orch(s, 's2')).toBeDefined();
+      expect(s.log.map((e) => e.projectId)).toEqual(['p2']);
+      expect(store.removeProject('p1', 2000)).toBe(false);
+      expect(store.removeProject('unknown', 2000)).toBe(false);
+    });
+
+    it('removeProject ignores late and backfilled events but comes back on new activity', () => {
+      store.apply(ev({ kind: 'session_start', sessionId: 's1', projectId: 'p1', ts: 1000 }));
+      store.removeProject('p1', 2000);
+      // Late hook from the removed session, and a backfilled older session in the same folder.
+      expect(store.apply(ev({ kind: 'idle', sessionId: 's1', projectId: 'p1', ts: 1500 }))).toBe(
+        false,
+      );
+      expect(
+        store.apply(ev({ kind: 'session_start', sessionId: 's0', projectId: 'p1', ts: 500 })),
+      ).toBe(false);
+      expect(store.snapshot().projects['p1']).toBeUndefined();
+      // Running Claude in that folder again brings the zone back.
+      expect(
+        store.apply(ev({ kind: 'user_prompt', sessionId: 's1', projectId: 'p1', ts: 3000 })),
+      ).toBe(true);
+      const s = store.snapshot();
+      expect(s.projects['p1']).toBeDefined();
+      expect(orch(s, 's1')?.status).toBe('thinking');
+      // Once back, normal ordering applies again.
+      expect(store.apply(ev({ kind: 'idle', sessionId: 's2', projectId: 'p1', ts: 2500 }))).toBe(
+        true,
+      );
     });
   });
 

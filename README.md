@@ -45,8 +45,93 @@ In the app:
 
 - Drag to pan, scroll or pinch to zoom, press `0` to fit everything.
 - Click a zone to fly to it, or a crew member to inspect it.
+- Right-click a zone and choose **Remove from station** to hide it. It comes back as soon as
+  Claude Code does something new in that folder.
 - The side panel lists projects, crew (status, current tool, elapsed time, tool calls) and a filterable activity log.
 - The tray icon's dot turns to **needs input** whenever an agent is waiting for you.
+
+### Auto-launch
+
+When a Claude Code session starts and WSC isn't running, the plugin's `SessionStart` hook starts
+it in the background (your terminal keeps focus) and hands it the new session. If WSC is already
+running, the session simply appears in the same window — there is only ever one instance. Turn
+this off with **Settings → Launch on session start**, or `WSC_AUTOLAUNCH=0`; **Focus on session
+start** brings the window to the front instead. Start WSC once by hand after installing so the
+hook knows where the app is.
+
+## Dashboard
+
+The left column of the window is a live dashboard that shares its data with the station, so the
+two never disagree. Collapse it to a slim rail with `«`; clicking a session card selects that
+session's orchestrator on the station, and clicking a crew member selects its session here.
+
+- **Usage window:** tokens used in the current window across **all** sessions, time until it
+  resets, burn rate (tokens/min over the last 10 min), the projected total at reset, and the
+  weekly total (last 7 days).
+- **Session cards:** active sessions first. Status (**working**, **waiting for you**, **idle**,
+  **ended**), project, git branch, short session id, models, what it is doing right now
+  ("Editing app.ts", "Running npm test", "Reading 3 files"), start time, last activity,
+  duration, tokens and subagents.
+- **Session detail:** a timeline of prompts, tool calls, subagents and errors (newest first), and
+  input / output / cache-write / cache-read tokens, per model when more than one was used.
+- **Tokens per hour:** the last 24 hours, stacked by project.
+
+**How the usage estimate works.** Claude Code records each API response's token usage in its
+local transcripts (`~/.claude/projects/**/*.jsonl`). WSC reads them incrementally — only new
+bytes — and counts each response once. "Tokens" means input + output + cache write. Cache reads
+are shown separately but not counted: every API call re-reads the whole cached conversation, so
+they repeat tokens already counted and would make up ~98% of the total.
+A window starts at the first activity after the previous window ended, rounded down to the hour,
+and lasts `usageWindowHours` (5 by default) — a common community convention, so treat it as an
+estimate. The transcripts don't contain your plan's real allowance, so there is no percentage
+until you set your own limits (`windowTokenLimit`, `weeklyTokenLimit`); then the bars turn
+amber at 75 % and red at 90 %. The exact remaining quota is only shown by Claude Code's own
+`/usage` command.
+
+### Settings
+
+Everything is in **Settings** (right panel) and saved to `settings.json` in the app-data folder
+(`~/Library/Application Support/WSC` on macOS, `%APPDATA%\WSC` on Windows, `~/.config/WSC` on
+Linux).
+
+| Setting                | Default | Meaning                                                                                       |
+| ---------------------- | ------- | --------------------------------------------------------------------------------------------- |
+| `launchOnSessionStart` | `true`  | The `SessionStart` hook starts WSC when it isn't running                                      |
+| `focusOnSessionStart`  | `false` | Bring the window to the front when a session starts (off: never steal focus)                  |
+| `dashboardOpen`        | `true`  | Dashboard column expanded (it auto-collapses in narrow windows)                               |
+| `lookbackDays`         | `7`     | Transcripts changed within this many days are read at startup                                 |
+| `idleMinutes`          | `10`    | A session with no activity for this long shows as idle                                        |
+| `usageWindowHours`     | `5`     | Length of the usage window                                                                    |
+| `windowTokenLimit`     | `null`  | Your calibrated token limit per window; enables the % bar                                     |
+| `weeklyTokenLimit`     | `null`  | Same, per 7 days                                                                              |
+| `showPromptPreview`    | `false` | Show the start of your latest prompt on its card (redacted, 120 chars, memory only)           |
+| `prices`               | `{}`    | Optional cost estimate, USD per million tokens by model-id substring (no prices are built in) |
+| `port`                 | `47821` | Preferred local port (falls back to a free one)                                               |
+
+`prices` example (fill in the numbers from your own price list) — a model is priced by the longest
+key its id contains, and costs are shown only when every model in the range has a price:
+
+```json
+"prices": {
+  "opus": { "input": 0, "output": 0, "cacheWrite": 0, "cacheRead": 0 }
+}
+```
+
+## Hooks without the plugin
+
+The plugin is the recommended install. If you don't use it, merge the same hooks into
+`~/.claude/settings.json` from a WSC checkout:
+
+```sh
+npm run hooks:install     # backs up settings.json, merges WSC's hooks, keeps everything else
+npm run hooks:uninstall   # removes only WSC's hook entries; the app stays installed
+```
+
+Both are idempotent and accept `-- --settings <path>`. Install refuses while the `wsc@wsc` plugin
+is enabled, because both copies of each hook would fire (`--force` overrides).
+
+Having trouble (port in use, hooks not firing, stale lock file, app not launching)? See
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Themes
 
@@ -72,7 +157,7 @@ _Built a theme? [Submit it](CONTRIBUTING.md#submitting-a-theme) and it'll be lis
 Claude Code ──hooks──▶ forward.mjs ──POST 127.0.0.1──▶ WSC app ──▶ pixel-art station
    (any number of          (silent,          (token-checked,   (normalize → state →
     sessions/projects)      always exit 0)    local only)        crew choreography)
-            └── ~/.claude/projects/*.jsonl ── read on launch to restore running agents
+            └── ~/.claude/projects/**/*.jsonl ── watched live: usage, timelines, sessions without hooks
 ```
 
 The station layout is the same in every theme:
@@ -100,7 +185,7 @@ Tool inputs can contain secrets and private code, so WSC keeps only what the pic
 - the tool name;
 - a short sanitized summary: a file basename, a website hostname, or the first ~60 characters of a command with tokens, keys, passwords and `Authorization` headers redacted.
 
-This applies to the side panel **and** to speech bubbles. Your prompts and tool output are never stored, and nothing is written to disk except settings. Tests feed realistic secrets through the whole pipeline and assert none of them reach the screen. See [SECURITY.md](SECURITY.md).
+This applies to the side panel, the dashboard **and** speech bubbles. Your prompts and tool output are never stored — unless you turn on `showPromptPreview`, which keeps a redacted 120-character preview of the latest prompt in memory only. From transcripts WSC reads token counts, model ids and git branch names. Nothing is written to disk except settings and a few small runtime files. Tests feed realistic secrets through the whole pipeline and assert none of them reach the screen. See [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
@@ -109,7 +194,7 @@ Not in v1, but planned:
 - **Light controls** (still no prompting): open a terminal for a project, jump to a project folder, focus/zoom from the tray.
 - **Hand-made pixel art** per theme. Community artists are welcome; the sprite-sheet pipeline is ready.
 - **Codex CLI adapter:** show Codex sessions from `~/.codex/sessions/` in their own zones.
-- Session replay and a timeline scrubber from transcripts.
+- Session replay and a scrubber over the dashboard timeline.
 - Sound packs per theme.
 - Shareable short GIF export of a run, with redaction on.
 - More built-in and community themes.

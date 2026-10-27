@@ -37,6 +37,11 @@ export class Camera {
 
   constructor(private readonly world: Container) {}
 
+  /** Easing toward a target, keyboard panning or pinching: the frame pacer keeps drawing. */
+  get busy(): boolean {
+    return this.target !== null || this.keys.size > 0 || this.pinch !== null;
+  }
+
   get zoom(): number {
     return this.view.zoom;
   }
@@ -161,6 +166,7 @@ export class Camera {
   /** Wire pointer/wheel/keyboard input. Returns a detach function. */
   attach(el: HTMLElement): () => void {
     const onDown = (e: PointerEvent): void => {
+      if (e.button === 2) return; // right-click opens the zone menu, never drags
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.pointers.size === 1) {
         this.drag = {

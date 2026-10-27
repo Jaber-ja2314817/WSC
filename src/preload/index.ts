@@ -11,6 +11,7 @@ import {
   type WindowMode,
   type WscApi,
 } from '@shared/ipc';
+import type { DashboardSnapshot, TimelineStep } from '@shared/dashboardTypes';
 import type { Settings } from '@shared/settings';
 import type { StationSnapshot } from '@shared/types';
 
@@ -37,12 +38,18 @@ const api: WscApi = {
   setSettings: (patch) => ipcRenderer.invoke(IPC.setSettings, patch) as Promise<Settings>,
   onSettings: (cb) => listen<Settings>(IPC.settings, cb),
   clearIdleProjects: () => ipcRenderer.invoke(IPC.clearIdleProjects) as Promise<void>,
+  removeProject: (projectId) => ipcRenderer.invoke(IPC.removeProject, projectId) as Promise<void>,
   getWindowMode: () => ipcRenderer.invoke(IPC.getWindowMode) as Promise<WindowMode>,
   setWindowMode: (mode) => ipcRenderer.invoke(IPC.setWindowMode, mode) as Promise<void>,
   onWindowMode: (cb) => listen<WindowMode>(IPC.windowMode, cb),
   getCamera: (mode) => ipcRenderer.invoke(IPC.getCamera, mode) as Promise<CameraState | null>,
   saveCamera: (mode, camera) => ipcRenderer.invoke(IPC.saveCamera, mode, camera) as Promise<void>,
   reportThemes: (themes) => ipcRenderer.send(IPC.reportThemes, themes),
+  getDashboard: () => ipcRenderer.invoke(IPC.getDashboard) as Promise<DashboardSnapshot | null>,
+  onDashboard: (cb) => listen<DashboardSnapshot>(IPC.dashboard, cb),
+  getTimeline: (sessionId) =>
+    ipcRenderer.invoke(IPC.getTimeline, sessionId) as Promise<TimelineStep[]>,
+  setVisible: (visible) => ipcRenderer.send(IPC.visibility, visible === true),
 };
 
 contextBridge.exposeInMainWorld('wsc', api);

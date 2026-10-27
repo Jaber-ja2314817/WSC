@@ -50,6 +50,8 @@ export class StationStore {
   private readonly meta = new Map<string, AgentMeta>();
   /** Removed sessions → their end ts; late events at or before it are ignored. */
   private readonly removedSessions = new Map<string, number>();
+  /** Projects removed by the user → removal ts; only newer activity brings them back. */
+  private readonly removedProjects = new Map<string, number>();
   private readonly seen = new Set<string>();
   private readonly listeners = new Set<() => void>();
   private log: LogEntry[] = [];
@@ -134,6 +136,22 @@ export class StationStore {
     if (changed) this.emit();
   }
 
+  /**
+   * Remove a project zone and everything in it. Events at or before `now` (late hooks,
+   * transcript backfill) stay ignored; any newer activity in that folder recreates the zone.
+   */
+  removeProject(projectId: string, now: number): boolean {
+    const project = this.projects.get(projectId);
+    if (!project) return false;
+    const removedAt = Math.max(now, project.lastEventAt);
+    for (const sid of [...project.sessionIds]) this.removeSession(sid, removedAt);
+    this.projects.delete(projectId);
+    this.removedProjects.set(projectId, removedAt);
+    this.log = this.log.filter((e) => e.projectId !== projectId);
+    this.emit();
+    return true;
+  }
+
   snapshot(): StationSnapshot {
     return structuredClone({
       projects: Object.fromEntries(this.projects),
@@ -188,6 +206,11 @@ export class StationStore {
     if (removedAt !== undefined) {
       if (ev.ts <= removedAt) return false;
       this.removedSessions.delete(sessionId);
+    }
+    const projectRemovedAt = this.removedProjects.get(projectId);
+    if (projectRemovedAt !== undefined) {
+      if (ev.ts <= projectRemovedAt) return false;
+      this.removedProjects.delete(projectId);
     }
 
     this.remember(id);
@@ -263,6 +286,8 @@ export class StationStore {
           ended.push(useId);
           if (ended.length > ENDED_USE_IDS_CAP) ended.shift();
         }
+        // A finished subagent stays done: its hand-back call's result lands after agent_finish.
+        if (agent.status === 'done' && !agent.isOrchestrator) break;
         const current = agent.currentTool;
         // Parallel tools: ending A while B is the current tool keeps B working.
         const endsCurrent = !current || current.useId === undefined || current.useId === useId;

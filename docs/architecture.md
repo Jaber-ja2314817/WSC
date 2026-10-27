@@ -4,23 +4,25 @@ WSC observes Claude Code and draws it. It never sends anything back to Claude Co
 
 ```
 Claude Code sessions ──hook──▶ plugin/hooks/forward.mjs ──POST 127.0.0.1:<port>/v1/events──┐
-~/.claude/projects/**/*.jsonl ─────────────── read by backfill ────────────────────────────┤
+~/.claude/projects/**/*.jsonl ──── backfill (launch) + transcriptWatcher (live, incremental) ┤
 demo script ───────────────────────────────────────────────────────────────────────────────┤
                                                                                             ▼
           main: adapters → normalizer → StationEvent → StationStore ──IPC snapshot (≤10/s)──▶ renderer
+                                     │      └──── TranscriptExtras (usage, model, branch)       │
+                                     └──────────▶ SessionLedger ──IPC dashboard (≤2/s)────────▶ │
                                                                                             │
-                     renderer: layout → director (choreography) → scene (PixiJS) + panels (Preact)
+          renderer: layout → director (choreography) → scene (PixiJS) + panels + dashboard (Preact)
 ```
 
 ## Source adapters
 
 Every input comes in through an adapter. Adapters emit raw records, and the normalizer turns them into `StationEvent`s.
 
-| Adapter             | Input                                           | Where                                           |
-| ------------------- | ----------------------------------------------- | ----------------------------------------------- |
-| `claude-hooks`      | JSON bodies POSTed by the forwarder             | `src/main/server.ts` → `src/main/station.ts`    |
-| `claude-transcript` | transcript JSONL files and subagent `meta.json` | `src/main/backfill.ts`                          |
-| `demo`              | a scripted timeline of synthetic events         | `src/shared/demoScript.ts` → `src/main/demo.ts` |
+| Adapter             | Input                                           | Where                                                   |
+| ------------------- | ----------------------------------------------- | ------------------------------------------------------- |
+| `claude-hooks`      | JSON bodies POSTed by the forwarder             | `src/main/server.ts` → `src/main/station.ts`            |
+| `claude-transcript` | transcript JSONL files and subagent `meta.json` | `src/main/backfill.ts`, `src/main/transcriptWatcher.ts` |
+| `demo`              | a scripted timeline of synthetic events         | `src/shared/demoScript.ts` → `src/main/demo.ts`         |
 
 A future Codex adapter (reading `~/.codex/sessions/`) plugs in here without touching the store or the renderer.
 
@@ -30,39 +32,44 @@ A future Codex adapter (reading `~/.codex/sessions/`) plugs in here without touc
 
 ### `src/shared`: pure TypeScript, no Electron, Node or DOM imports, unit-tested
 
-| Module              | Responsibility                                                                                                                           |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `types.ts`          | `StationEvent`, `ToolCategory`, agent, session and project state, and `StationSnapshot`                                                  |
-| `normalizer/`       | `hook.ts` handles hook payloads; `transcript.ts` handles transcript lines and subagent meta. Both are tolerant and never throw           |
-| `toolCategories.ts` | tool name → category, with user overrides. Unknown tools map to `other`                                                                  |
-| `redact.ts`         | sanitized tool summaries (basenames, hostnames, truncated and redacted commands) for panels and bubbles                                  |
-| `projects.ts`       | working directory → stable `projectId` (12-hex FNV-1a hash) and a display name (folder basename)                                         |
-| `store.ts`          | `StationStore`: projects → sessions → agents. Dedupe, out-of-order handling, stale and lost signals, capped activity log                 |
-| `layoutTypes.ts`    | layout contract, in tiles                                                                                                                |
-| `layout.ts`         | `computeLayout`: center table, lounge, and project zones in stable slots (N, E, S, W, then diagonals and a second ring), desks that grow |
-| `astar.ts`          | grid A* with a binary heap, plus `makePathfinder` with an LRU cache                                                                      |
-| `bubbles.ts`        | `BubbleQueue`: per-crew and global rate limits, priorities, stacking                                                                     |
-| `themeSchema.ts`    | zod schema for `theme.json` and `validateTheme`                                                                                          |
-| `settings.ts`       | settings schema and defaults                                                                                                             |
-| `demoScript.ts`     | the scripted demo run, covering two projects with a third added live                                                                     |
-| `ipc.ts`            | IPC channel names and the `window.wsc` API type                                                                                          |
+| Module              | Responsibility                                                                                                                                                                                     |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `types.ts`          | `StationEvent`, `ToolCategory`, agent, session and project state, and `StationSnapshot`                                                                                                            |
+| `normalizer/`       | `hook.ts` handles hook payloads; `transcript.ts` handles transcript lines and subagent meta. Both are tolerant and never throw                                                                     |
+| `toolCategories.ts` | tool name → category, with user overrides. Unknown tools map to `other`                                                                                                                            |
+| `redact.ts`         | sanitized tool summaries (basenames, hostnames, truncated and redacted commands) for panels and bubbles                                                                                            |
+| `projects.ts`       | working directory → stable `projectId` (12-hex FNV-1a hash) and a display name (folder basename)                                                                                                   |
+| `store.ts`          | `StationStore`: projects → sessions → agents. Dedupe, out-of-order handling, stale and lost signals, capped activity log, removed zones                                                            |
+| `layoutTypes.ts`    | layout contract, in tiles                                                                                                                                                                          |
+| `layout.ts`         | `computeLayout`: center table, lounge, and project zones in stable slots (N, E, S, W, then diagonals and a second ring), desks that grow only when every seat is taken (finished crew don't count) |
+| `astar.ts`          | grid A* with a binary heap, plus `makePathfinder` with an LRU cache                                                                                                                                |
+| `bubbles.ts`        | `BubbleQueue`: per-crew and global rate limits, priorities, stacking                                                                                                                               |
+| `themeSchema.ts`    | zod schema for `theme.json` and `validateTheme`                                                                                                                                                    |
+| `settings.ts`       | settings schema and defaults                                                                                                                                                                       |
+| `demoScript.ts`     | the scripted demo run, covering two projects with a third added live                                                                                                                               |
+| `dashboardTypes.ts` | dashboard contract: `TokenUsage`, `UsageRecord`, `TranscriptExtras`, `SessionSummary`, `TimelineStep`, `UsageStats`, `DashboardSnapshot`                                                           |
+| `usage.ts`          | `UsageBook` (usage deduped by `message.id` + `requestId`), usage-window maths, burn rate, projection, weekly and hourly totals, optional cost from user prices                                     |
+| `dashboard.ts`      | `SessionLedger`: per-session history (project, branch, models, timeline, usage) and `describeStep`. Status comes from the store first, so the dashboard and the station agree                      |
+| `ipc.ts`            | IPC channel names and the `window.wsc` API type                                                                                                                                                    |
 
 ### `src/main`: Electron main process
 
-| Module           | Responsibility                                                                                                                                  |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `index.ts`       | app lifecycle, single-instance lock, IPC handlers, and startup args (`--demo`, `--compact`, `--theme=`)                                         |
-| `station.ts`     | wires the server, backfill and demo into the store; throttles snapshot pushes; owns the live and demo modes                                     |
-| `server.ts`      | `POST /v1/events`, `POST /v1/command` and `GET /v1/health` on 127.0.0.1. Requires the token, rejects any `Origin` header, caps bodies at 256 KB |
-| `runtimeFile.ts` | `{port, token, pid, version}` in app-data with mode 0600; written atomically and removed on exit                                                |
-| `netGuard.ts`    | cancels every non-local request in the Electron session and denies all permission requests                                                      |
-| `backfill.ts`    | rebuilds recent sessions from transcripts at launch and when a session is first seen                                                            |
-| `appState.ts`    | stores only the `hasReceivedEvents` flag that drives the first-run screen                                                                       |
-| `settings.ts`    | the settings JSON file in app-data                                                                                                              |
-| `userThemes.ts`  | loads community themes from the app-data `themes/` folder                                                                                       |
-| `tray.ts`        | tray or menu-bar icon with a status dot                                                                                                         |
-| `windows.ts`     | normal and compact windows; remembers bounds and mode                                                                                           |
-| `demo.ts`        | `DemoPlayer`: plays `demoScript` into the station on timers and loops it                                                                        |
+| Module                 | Responsibility                                                                                                                                                                                                                                                                     |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index.ts`             | app lifecycle, single-instance lock, IPC handlers, and startup args (`--demo`, `--compact`, `--theme=`)                                                                                                                                                                            |
+| `station.ts`           | wires the server, backfill and demo into the store; throttles snapshot pushes; owns the live and demo modes                                                                                                                                                                        |
+| `server.ts`            | `POST /v1/events`, `POST /v1/command` and `GET /v1/health` on 127.0.0.1. Requires the token, rejects any `Origin` header, caps bodies at 256 KB                                                                                                                                    |
+| `runtimeFile.ts`       | `{port, token, pid, version}` in app-data with mode 0600; written atomically and removed on exit                                                                                                                                                                                   |
+| `netGuard.ts`          | cancels every non-local request in the Electron session and denies all permission requests                                                                                                                                                                                         |
+| `backfill.ts`          | rebuilds recent sessions from transcripts at launch and when a session is first seen                                                                                                                                                                                               |
+| `appState.ts`          | stores only the `hasReceivedEvents` flag that drives the first-run screen                                                                                                                                                                                                          |
+| `settings.ts`          | the settings JSON file in app-data                                                                                                                                                                                                                                                 |
+| `userThemes.ts`        | loads community themes from the app-data `themes/` folder                                                                                                                                                                                                                          |
+| `tray.ts`              | tray or menu-bar icon with a status dot                                                                                                                                                                                                                                            |
+| `windows.ts`           | normal and compact windows; remembers bounds and mode                                                                                                                                                                                                                              |
+| `transcriptWatcher.ts` | watches `~/.claude/projects` (`fs.watch` recursive + a 10 s safety rescan). Startup scan of the last `lookbackDays` in chunks (older than 24 h: usage-only fast path); then only appended bytes, per-file offsets, partial lines kept, truncation and replacement restart the file |
+| `launchInfo.ts`        | writes `launch.json` (how to start this app again) for the hook's auto-launch; parses `--from-hook` / `--hook-payload`                                                                                                                                                             |
+| `demo.ts`              | `DemoPlayer`: plays `demoScript` into the station on timers and loops it                                                                                                                                                                                                           |
 
 ### `src/preload`
 
@@ -76,7 +83,7 @@ Exposes a minimal typed IPC bridge as `window.wsc`. The renderer is sandboxed an
 | `director/`   | `Director`: maps snapshots to choreography (lounge pool, desk assignment, report trips, bubbles). Has no Pixi imports and is unit-tested                     |
 | `scene/`      | `StationScene` and `Camera`: cached floor and wall layers, y-sorted props and crew, nameplates, bubbles, tooltips, and pan/zoom with integer zoom levels     |
 | `themes/`     | theme runtime, loader and manager; pure pixel buffers and a crew generator; per-theme generators (`generators/*.ts`); sprite-sheet support for hand-made art |
-| `panels/`     | Preact panels: projects, crew, activity log, first-run setup and settings                                                                                    |
+| `panels/`     | Preact panels: projects, crew, activity log, first-run setup, settings, and the dashboard column (`Dashboard.tsx`, pure `dashboardModel.ts`)                 |
 
 The Claude Code plugin is in `plugin/`. It holds the hooks, the forwarder, the `/station` skill and the launcher. The marketplace manifest is at `.claude-plugin/marketplace.json`, with `source: "./plugin"`. See `docs/claude-code-integration.md`.
 
@@ -111,6 +118,23 @@ The store holds the truth, and the director animates toward it.
 - Long walks are sped up to about 4 s at most.
 - Bursts of state changes snap instead of queueing behind reality.
 - With reduce-motion on, agents snap to their destinations.
+
+## Dashboard data flow
+
+- **Station events** (hooks, backfill, live transcript lines, demo) go to both the `StationStore` and the `SessionLedger`. Live transcript events reach the store only when they are less than 30 minutes old, so old history never floods the station; the startup scan feeds only the ledger.
+- **Usage** exists only in transcripts. Each assistant message is written once per content block with identical usage, so it is counted once by `message.id` + `requestId`.
+- **Status** shown on a card comes from the store's agents when the store has the session (working, waiting), and from the ledger otherwise (turn ended → waiting for you; `idleMinutes` without activity → idle; `SessionEnd` → ended).
+- **Pushes:** the dashboard snapshot is rebuilt at most every 500 ms when something changed and every 5 s for timers, and is not sent when unchanged. Timelines are fetched on demand (`getTimeline`).
+- **Startup scan:** main transcripts are read newest first, so active sessions show up at once, and files are watched from the start: appends to a file the scan already read arrive live straight away; a file changed before the scan reached it is read live right after.
+- **Repeated usage:** a resumed session's file repeats the original's history with the same message ids. A repeated response counts once and is credited to the session whose transcript was created first (`UsageRecord.rank`), whatever the read order.
+- **Subagent end:** the hand-back tool call ends a subagent. Without one, a subagent quiet for 10 minutes is done (60 minutes while one of its tool calls still runs), as in the backfill.
+
+## Resource use
+
+- **Frame pacing** (`renderer/scene/pacing.ts`): one loop drives every Pixi ticker (Pixi's own tickers would each run `requestAnimationFrame` at the display rate). It draws at 30 fps while crew walk or fade, a bubble fades out, the camera moves or the pointer is active; at the fastest visible sprite loop (4–10 fps) when the scene is still; and not at all while the window is hidden.
+- **Hidden window:** the renderer reports its visibility (`setVisible`). While hidden, minimized or closed to the menu bar, main still ingests events but builds and pushes no snapshots; showing the window again sends the current state once.
+- **Main timers:** station snapshots are pushed only after a store change (at most one per 100 ms); the tray and notification check runs only when the store changed.
+- **Auto-launch:** the `SessionStart` hook starts the app with `--from-hook --hook-payload=…` when it isn't running; Electron's single-instance lock routes a racing second launch to the running app. See `docs/claude-code-integration.md` §10.
 
 ## Security and privacy
 

@@ -56,6 +56,33 @@ function NumberInput(props: {
   );
 }
 
+/** Optional positive integer; empty clears it (null). */
+function LimitInput(props: {
+  value: number | null;
+  max: number;
+  label: string;
+  onChange: (v: number | null) => void;
+}) {
+  return (
+    <input
+      type="number"
+      min={1}
+      max={props.max}
+      step={1000}
+      placeholder="none"
+      aria-label={props.label}
+      class="wsc-set-wide"
+      value={props.value ?? ''}
+      onChange={(e) => {
+        const raw = (e.target as HTMLInputElement).value.trim();
+        if (raw === '') return props.onChange(null);
+        const v = Number(raw);
+        if (Number.isInteger(v) && v >= 1 && v <= props.max) props.onChange(v);
+      }}
+    />
+  );
+}
+
 function ToolMappings(props: {
   value: Record<string, ToolCategory>;
   onChange: (v: Record<string, ToolCategory>) => void;
@@ -243,6 +270,82 @@ export function SettingsPanel({ api, settings, themes, version }: SettingsPanelP
             onChange={(v) => set({ port: v })}
           />
         </Row>
+      </section>
+
+      <section class="wsc-section-plain">
+        <h3>Dashboard &amp; launch</h3>
+        <Row label="Show dashboard" hint="Left column; « / » collapses it">
+          <Toggle value={settings.dashboardOpen} onChange={(v) => set({ dashboardOpen: v })} />
+        </Row>
+        <Row label="Launch on session start" hint="A new Claude Code session opens WSC">
+          <Toggle
+            value={settings.launchOnSessionStart}
+            onChange={(v) => set({ launchOnSessionStart: v })}
+          />
+        </Row>
+        <Row label="Focus on session start" hint="Off: never steals focus">
+          <Toggle
+            value={settings.focusOnSessionStart}
+            onChange={(v) => set({ focusOnSessionStart: v })}
+          />
+        </Row>
+        <Row label="Idle after (min)" hint="No activity → session shows idle">
+          <NumberInput
+            value={settings.idleMinutes}
+            min={1}
+            max={240}
+            onChange={(v) => set({ idleMinutes: v })}
+          />
+        </Row>
+        <Row label="Usage window (h)" hint="Rolling window length (estimate)">
+          <NumberInput
+            value={settings.usageWindowHours}
+            min={1}
+            max={24}
+            onChange={(v) => set({ usageWindowHours: v })}
+          />
+        </Row>
+        <Row label="History (days)" hint="Transcripts read at startup">
+          <NumberInput
+            value={settings.lookbackDays}
+            min={1}
+            max={30}
+            onChange={(v) => set({ lookbackDays: v })}
+          />
+        </Row>
+        <Row label="Window token limit" hint="Empty = show raw totals">
+          <LimitInput
+            label="Window token limit"
+            value={settings.windowTokenLimit}
+            max={1e12}
+            onChange={(v) => set({ windowTokenLimit: v })}
+          />
+        </Row>
+        <Row label="Weekly token limit" hint="Empty = show raw totals">
+          <LimitInput
+            label="Weekly token limit"
+            value={settings.weeklyTokenLimit}
+            max={1e13}
+            onChange={(v) => set({ weeklyTokenLimit: v })}
+          />
+        </Row>
+        <Row
+          label="Show prompt preview"
+          hint="Privacy: shows a short, redacted snippet of your latest prompt. Kept in memory only."
+        >
+          <Toggle
+            value={settings.showPromptPreview}
+            onChange={(v) => set({ showPromptPreview: v })}
+          />
+        </Row>
+        <p class="wsc-set-note">
+          Limits are your own calibration — exact remaining quota is only in Claude Code&apos;s
+          /usage. Cost estimates need per-model <code>prices</code> (USD per million tokens) in
+          settings.json
+          {Object.keys(settings.prices).length > 0
+            ? ` — ${Object.keys(settings.prices).length} configured.`
+            : ' — none configured.'}
+        </p>
       </section>
 
       <section class="wsc-section-plain">

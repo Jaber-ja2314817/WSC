@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { findPath } from '../src/shared/astar';
-import { computeLayout } from '../src/shared/layout';
+import { computeLayout, layoutInputFor } from '../src/shared/layout';
 import {
   DESK_H,
   DESK_W,
@@ -9,6 +9,8 @@ import {
   type StationLayout,
   type TilePos,
 } from '../src/shared/layoutTypes';
+import { StationStore } from '../src/shared/store';
+import { ev, resetSeq } from './fixtures/events';
 
 const projects = (n: number, agentCount = 4): LayoutInput['projects'] =>
   Array.from({ length: n }, (_, i) => ({ id: `p${i}`, name: `proj-${i}`, order: i, agentCount }));
@@ -186,5 +188,47 @@ describe('computeLayout stability', () => {
         z.door.y === z.rect.y + z.rect.h - 1;
       expect(onEdge).toBe(true);
     }
+  });
+});
+
+describe('layoutInputFor', () => {
+  const deskCount = (store: StationStore): number =>
+    computeLayout(layoutInputFor(store.snapshot(), 6)).zones[0]!.desks.length;
+
+  it('seats new crew at free desks instead of adding space', () => {
+    resetSeq();
+    const store = new StationStore();
+    store.apply(ev({ kind: 'session_start' }));
+    const desks = deskCount(store);
+    // Agents come and go one after another: the room never needs more than one seat.
+    for (let i = 0; i < 12; i++) {
+      store.apply(ev({ kind: 'agent_spawn', agentId: `a${i}` }));
+      expect(deskCount(store)).toBe(desks);
+      store.apply(ev({ kind: 'agent_finish', agentId: `a${i}` }));
+    }
+    expect(deskCount(store)).toBe(desks);
+  });
+
+  it('counts only crew that still need a seat, never the orchestrator', () => {
+    resetSeq();
+    const store = new StationStore();
+    store.apply(ev({ kind: 'session_start' }));
+    for (const id of ['a1', 'a2', 'a3']) store.apply(ev({ kind: 'agent_spawn', agentId: id }));
+    store.apply(ev({ kind: 'agent_finish', agentId: 'a1' }));
+    store.apply(ev({ kind: 'agent_error', agentId: 'a2' }));
+    const input = layoutInputFor(store.snapshot(), 6);
+    expect(input.projects).toEqual([{ id: 'proj-a', name: 'project-a', order: 0, agentCount: 2 }]);
+    expect(input.orchestratorSeats).toBe(1);
+  });
+
+  it('adds space only once every seat is taken', () => {
+    resetSeq();
+    const store = new StationStore();
+    store.apply(ev({ kind: 'session_start' }));
+    const desks = deskCount(store);
+    for (let i = 0; i < desks; i++) store.apply(ev({ kind: 'agent_spawn', agentId: `a${i}` }));
+    expect(deskCount(store)).toBe(desks);
+    store.apply(ev({ kind: 'agent_spawn', agentId: 'extra' }));
+    expect(deskCount(store)).toBeGreaterThan(desks);
   });
 });

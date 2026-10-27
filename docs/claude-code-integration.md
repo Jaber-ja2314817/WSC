@@ -1,6 +1,6 @@
 # Claude Code integration
 
-**Verified against:** Claude Code **2.1.294**, on 2026-10-08.
+**Verified against:** Claude Code **2.1.294**, on 2026-10-08 (live). Re-checked for **2.1.308** on 2026-10-22: hook event names and fields against the docs, transcript shapes locally (§7). Live hook run on 2.1.308: see §8.
 **Sources:**
 
 - Official docs at `code.claude.com/docs`: `hooks`, `hooks-guide`, `plugins/*`, `skills`, `sub-agents`, `memory`.
@@ -22,7 +22,7 @@ This file is the contract for `src/shared/normalizer.ts`. That is the only code 
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SessionStart`               | Seat the orchestrator and create or reuse the project zone. `source` is one of `startup`, `resume`, `clear`, `compact` or `fork`. [docs]                            |
 | `SessionEnd`                 | Every agent reports in, then the seat empties. `reason` is one of `clear`, `resume`, `logout`, `prompt_input_exit` or `other`. The default timeout is 1.5 s. [docs] |
-| `UserPromptSubmit`           | The orchestrator wakes up (`user_prompt`). We never read `prompt` beyond its existence.                                                                             |
+| `UserPromptSubmit`           | The orchestrator wakes up (`user_prompt`). We never read `prompt`; `prompt_id` keys the event so the transcript's copy of the same prompt dedupes.                  |
 | `PreToolUse`                 | `tool_start` with a category.                                                                                                                                       |
 | `PostToolUse`                | `tool_end` with `ok: true`.                                                                                                                                         |
 | `PostToolUseFailure`         | `tool_end` with `ok: false`. If `is_interrupt` is false, the bubble shows an error. [docs]                                                                          |
@@ -50,7 +50,7 @@ Every event carries these common fields [docs]: `session_id`, `transcript_path`,
 | ------------------------ | --------------------------------------------------------------------------------------- | -------------------------------- |
 | SessionStart             | `source`                                                                                | `session_start`                  |
 | SessionEnd               | `reason`                                                                                | `session_end`                    |
-| UserPromptSubmit         | none (the prompt text is ignored)                                                       | `user_prompt`                    |
+| UserPromptSubmit         | `prompt_id` (id only; the prompt text is ignored)                                       | `user_prompt`                    |
 | PreToolUse               | `tool_name`, `tool_input` (summarized and redacted), `tool_use_id`                      | `tool_start`                     |
 | PostToolUse              | `tool_name`, `tool_use_id`, `duration_ms`                                               | `tool_end` (ok)                  |
 | PostToolUseFailure       | `tool_name`, `tool_use_id`, `is_interrupt` (the error text is dropped)                  | `tool_end` (not ok)              |
@@ -181,7 +181,7 @@ Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-p
 - Never overwrite the user's file.
 - `"disableAllHooks": true` turns all hooks off temporarily. [docs]
 
-## 7. Transcript layout (used for backfill)
+## 7. Transcript layout (used for backfill, live watching and usage)
 
 ```
 ~/.claude/projects/<sanitized-cwd>/<sessionId>.jsonl                          # main thread  [docs+observed]
@@ -200,6 +200,14 @@ Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-p
 - `type` is one of `user`, `assistant`, `attachment` or `system`.
 - `message.content` is a string, or an array of blocks typed `text`, `thinking`, `tool_use` (`id`, `name`, `input`) or `tool_result` (`tool_use_id`, `is_error`).
 - Compaction appears as `{"type":"system","subtype":"compact_boundary"}`. [docs]
+- Many other `type`s exist and are ignored, e.g. `mode`, `permission-mode`, `file-history-snapshot`, `last-prompt`, `ai-title`, `api-request*`, `queue-operation`, `cost-state`. [observed 2.1.308]
+
+**Fields used by the dashboard** [observed 2.1.308, undocumented — the docs describe only `transcript_path`]:
+
+- `assistant` lines: `requestId`, `message.id`, `message.model`, `message.stop_reason`, `gitBranch`, and `message.usage` with `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` (plus nested `cache_creation`, `server_tool_use` and others we ignore).
+- **One API message is written once per content block** (up to 5 lines seen), each with the same `message.id` + `requestId` and identical `usage`. Usage is counted once per `${message.id}:${requestId}`. Records with model `<synthetic>` or all-zero usage are skipped.
+- `user` lines carry `promptId` on every line of a turn, including tool results. A **typed prompt** is a `user` line whose `isMeta` isn't true, whose `promptSource` isn't `system` (values seen: `typed`, `system`, absent), and whose content is a string or text blocks only. It becomes `user_prompt` with id `${sessionId}:prompt:${promptId}`, which matches the hook's `prompt_id` id.
+- Subagent files carry the parent `sessionId`, so their usage counts toward the parent session.
 
 **Behavior to rely on:**
 
@@ -210,7 +218,8 @@ Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-p
 
 - Skip any line that fails `JSON.parse` or has an unknown `type`.
 - Never throw.
-- Read only the fields needed for state; never retain message text.
+- Read only the fields needed for state; never retain message text. The opt-in `showPromptPreview` setting keeps a redacted, 120-character preview of the latest typed prompt in memory.
+- Startup reads files changed within `lookbackDays`; files older than 24 h go through a usage-only fast path that skips any line without `"usage"` before decoding it. After that only appended bytes are read.
 
 ## 8. Verified live (Claude Code 2.1.294, 2026-10-08)
 
@@ -226,7 +235,9 @@ Setup: two headless `claude -p --plugin-dir ./plugin` sessions ran at the same t
 8. **Backfill quirks seen on real data:**
    - Transcript file mtimes can be recent while every record is months old, so recency is judged by record timestamps.
    - Finished subagents always end with a `SubagentHandback` call.
-   - A subagent silent for 10 minutes or more is treated as finished.
+   - A subagent silent for 10 minutes or more is treated as finished (the live transcript watcher waits 60 minutes while one of its tool calls has no result yet).
+   - The hand-back call's own `tool_result` is written after the subagent finished; it must not turn the subagent back to "thinking".
+   - A resumed (or background) session's transcript repeats earlier history with the same `message.id` + `requestId` under its own `sessionId`; the usage is credited to the session whose transcript file was created first.
    - In the store, an agent stale for 15 minutes or more is marked done ("lost signal"), so it never occupies a desk forever.
    - A session that `cd`s keeps its original zone; later events carry the new `cwd`, and the store pins them to the session's first project.
 9. **Backfill:** transcripts never record a session end. An orchestrator `assistant` record with `stop_reason: "end_turn"` is mapped to `idle`, so closed sessions don't stay "thinking".
@@ -236,3 +247,11 @@ Setup: two headless `claude -p --plugin-dir ./plugin` sessions ran at the same t
 1. Do nested subagents (`spawnDepth` > 1) report a parent agent id? For now their parent is `orchestrator`.
 2. `PermissionRequest` and `Notification` were not exercised by the headless run, since `-p` mode never prompts. They need an interactive check.
 3. Field drift between versions. Re-verify this file on each Claude Code minor upgrade and note the version at the top.
+
+## 10. Auto-launch on `SessionStart` [decision]
+
+- The forwarder reads `hook_event_name` and nothing else from the payload. When it is `SessionStart` and the app isn't running (no runtime file, or the POST is refused), it starts the app detached and exits; it still never prints and always exits 0. Measured: about 30 ms including Node startup.
+- **Where the app is:** `launch.json` in the app folder, written by the app on every start (`{version, command, args, macBundle?}`). Fallbacks: `WSC_APP_PATH`, the usual install locations, then a source checkout. On macOS a bundle is started with `open -g` so the terminal keeps focus.
+- **Arguments:** `--from-hook --hook-payload=<base64url of the raw SessionStart JSON>` (omitted above 16 KB). The app feeds the payload through `normalizeHookPayload` like any other hook, so the session shows up before its transcript exists. `--from-hook` keeps the window from taking focus unless `focusOnSessionStart` is on.
+- **One instance:** a `launching.json` marker blocks a second launch for 15 s (older markers are stale and replaced), and Electron's single-instance lock forwards a racing launch's argv to the running app.
+- **Opt out:** setting `launchOnSessionStart: false` or env `WSC_AUTOLAUNCH=0`.

@@ -48,7 +48,11 @@ export class WindowManager {
     return this.currentMode;
   }
 
-  create(): BrowserWindow {
+  /**
+   * `inactive`: show without taking focus (launched by a Claude Code SessionStart hook while
+   * settings.focusOnSessionStart is off).
+   */
+  create(opts: { inactive?: boolean } = {}): BrowserWindow {
     const mode = this.currentMode;
     const size = SIZES[mode];
     const saved = this.opts.settings.windowState.bounds[mode];
@@ -75,12 +79,13 @@ export class WindowManager {
         sandbox: true,
         nodeIntegration: false,
         webSecurity: true,
+        spellcheck: false,
       },
     });
     if (compact) win.setAlwaysOnTop(true, 'floating');
     this.win = win;
 
-    win.on('ready-to-show', () => win.show());
+    win.on('ready-to-show', () => (opts.inactive ? win.showInactive() : win.show()));
     win.on('closed', () => {
       if (this.win === win) this.win = null;
     });

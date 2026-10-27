@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readRuntime } from './runtime-path.mjs';
+import { readLaunchInfo, readRuntime } from './runtime-path.mjs';
 
 const RELEASES_URL = 'https://github.com/OWNER/wsc/releases';
 const THEME_RE = /^[a-z0-9][a-z0-9_-]{0,40}$/i;
@@ -88,7 +88,11 @@ function onPath(name) {
   return null;
 }
 
-/** How to start the app: { command, args, shell? } or null when it can't be found. */
+/**
+ * How to start the app: { command, args, shell? } or null when it can't be found.
+ * Order: WSC_APP_PATH, then <appDir>/launch.json (written by the app), then the usual install
+ * locations, then a source checkout (WSC_REPO or the repo this plugin lives in).
+ */
 export function locateApp(extraArgs) {
   const explicit = process.env.WSC_APP_PATH;
   if (explicit) {
@@ -97,6 +101,19 @@ export function locateApp(extraArgs) {
       return { command: 'open', args: ['-a', explicit, '--args', ...extraArgs] };
     }
     return { command: explicit, args: extraArgs };
+  }
+
+  // What the app itself recorded the last time it ran (works from the plugin cache too).
+  const info = readLaunchInfo();
+  if (info?.macBundle) {
+    return { command: 'open', args: ['-a', info.macBundle, '--args', ...extraArgs] };
+  }
+  if (info) {
+    return {
+      command: info.command,
+      args: [...info.args, ...extraArgs],
+      shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(info.command),
+    };
   }
 
   const home = homedir();

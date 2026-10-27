@@ -14,7 +14,11 @@ describe('theme schema', () => {
     expect([...THEME_CREW_ANIMS]).toEqual([...CREW_ANIMS]);
   });
 
-  it.each(readdirSync('themes'))('accepts built-in theme %s', (id) => {
+  const builtIns = readdirSync('themes', { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+
+  it.each(builtIns)('accepts built-in theme %s', (id) => {
     const res = validateTheme(load(id));
     expect(res.ok ? [] : res.errors).toEqual([]);
   });
