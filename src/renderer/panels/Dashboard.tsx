@@ -4,6 +4,7 @@ import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type {
   DashboardSnapshot,
+  PlanLimits,
   SessionSummary,
   TimelineStep,
   UsageStats,
@@ -12,12 +13,16 @@ import { tokenTotal } from '@shared/dashboardTypes';
 import type { WscApi } from '@shared/ipc';
 import type { Settings } from '@shared/settings';
 import {
+  CARD_CHIP_MAX,
   CHART_TOP_N,
   DASHBOARD_AUTO_COLLAPSE_PX,
+  PLAN_STALE_MS,
+  barFill,
   clockHM,
   filledCells,
   formatCountdown,
   formatDuration,
+  formatResetAt,
   sessionDurationMs,
   formatRate,
   formatTokens,
@@ -26,6 +31,7 @@ import {
   modelRows,
   needsYou,
   percent,
+  planRows,
   railReading,
   relativeTime,
   segmentHeights,
@@ -96,14 +102,70 @@ function PixelBar({ pct, label }: { pct: number; label: string }) {
   );
 }
 
-function UsageTop({ usage, scanning }: { usage: UsageStats; scanning: boolean }) {
+/** Claude-app style plan usage: one bar per window, with the reset time. */
+function PlanUsage({ limits }: { limits: PlanLimits | undefined }) {
+  // Own 1 s timer: the reset countdowns tick without re-rendering the whole column.
+  const now = useNow(1000);
+  const rows = planRows(limits, now);
+  const stale = limits !== undefined && now - limits.updatedAt > PLAN_STALE_MS;
+  return (
+    <section class="wsc-dash-plan" aria-label="Plan usage" data-testid="dash-plan">
+      <div class="wsc-dash-kicker">
+        <span>Plan usage</span>
+        {rows.length > 0 && (
+          <span
+            class={stale ? 'wsc-dash-plan-age is-stale' : 'wsc-dash-plan-age'}
+            title="When Claude Code last reported these numbers"
+          >
+            {!stale && <span class="wsc-dash-dot wsc-bg-done" />}
+            {stale ? `as of ${relativeTime(limits.updatedAt, now)}` : 'live'}
+          </span>
+        )}
+      </div>
+      {rows.length === 0 ? (
+        <div class="wsc-dash-plan-empty">
+          <p>Waiting for Claude Code to report usage…</p>
+          <p class="wsc-dash-note">
+            Shows up after Claude&apos;s next reply on a Pro or Max plan. It needs the WSC status
+            line: run <code>npm run statusline:install</code> once.
+          </p>
+        </div>
+      ) : (
+        rows.map((r) => (
+          <div key={r.key} class="wsc-dash-plan-row" data-testid={`dash-plan-${r.key}`}>
+            <div class="wsc-dash-plan-head">
+              <span class="wsc-dash-plan-label">{r.label}</span>
+              <span class="wsc-dash-plan-reset">{formatResetAt(r.resetsAt, now)}</span>
+            </div>
+            <div class="wsc-dash-plan-meter">
+              <div
+                class={`wsc-dash-plan-bar wsc-lvl-${r.level}`}
+                role="meter"
+                aria-label={`${r.label} usage`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.min(100, r.pct)}
+              >
+                <span style={{ width: `${barFill(r.pct)}%` }} />
+              </div>
+              <span class={`wsc-dash-plan-pct wsc-lvl-${r.level}`}>{r.pct}% used</span>
+            </div>
+          </div>
+        ))
+      )}
+    </section>
+  );
+}
+
+function UsageTop(props: { usage: UsageStats; scanning: boolean; hasPlan: boolean }) {
+  const { usage, scanning, hasPlan } = props;
   const winPct = percent(usage.windowTotal, usage.windowLimit);
   const weekPct = percent(usage.weeklyTotal, usage.weeklyLimit);
   const noLimits = winPct === undefined && weekPct === undefined;
   return (
-    <section class="wsc-dash-usage" aria-label="Usage window">
+    <section class={`wsc-dash-usage${hasPlan ? ' is-secondary' : ''}`} aria-label="Token estimate">
       <div class="wsc-dash-kicker">
-        <span>{usage.windowHours}h window</span>
+        <span>Tokens · {usage.windowHours}h window (estimate)</span>
         {scanning && <span class="wsc-dash-scan">scanning history…</span>}
       </div>
       <div class="wsc-dash-hero">
@@ -154,10 +216,11 @@ function UsageTop({ usage, scanning }: { usage: UsageStats; scanning: boolean })
         </span>
       </div>
       {weekPct !== undefined && <PixelBar pct={weekPct} label="Weekly usage" />}
-      {noLimits && <p class="wsc-dash-hint">Set a limit in Settings to see a %.</p>}
+      {noLimits && !hasPlan && (
+        <p class="wsc-dash-hint">Set a token limit in Settings to see a %.</p>
+      )}
       <p class="wsc-dash-note">
-        Estimate from local transcripts — exact remaining quota is only in Claude Code&apos;s
-        /usage.
+        Counted from local transcripts{hasPlan ? '; the bars above are the real plan usage' : ''}.
       </p>
     </section>
   );
@@ -205,12 +268,17 @@ function SessionCard(props: {
         {s.subagents.length > 0 && (
           <span class="wsc-dash-chips" aria-label={`${s.subagents.length} subagents`}>
             <span class="wsc-dash-chipcount">{s.subagents.length} sub</span>
-            {s.subagents.map((a) => (
+            {s.subagents.slice(0, CARD_CHIP_MAX).map((a) => (
               <span key={a.id} class="wsc-dash-chip" title={`${a.label} · ${a.status}`}>
                 <span class={`wsc-dash-dot wsc-bg-${SUBAGENT_STATUS_TONE[a.status]}`} />
                 {a.label}
               </span>
             ))}
+            {s.subagents.length > CARD_CHIP_MAX && (
+              <span class="wsc-dash-chip wsc-dash-chip-more">
+                +{s.subagents.length - CARD_CHIP_MAX}
+              </span>
+            )}
           </span>
         )}
       </button>
@@ -392,7 +460,9 @@ function HourlyChart({ usage }: { usage: UsageStats }) {
 }
 
 function Rail(props: { dash: DashboardSnapshot | null; onExpand: () => void }) {
-  const reading = railReading(props.dash?.usage);
+  const now = useNow(5000);
+  const plan = planRows(props.dash?.planLimits, now);
+  const reading = railReading(props.dash?.usage, props.dash?.planLimits, now);
   const waiting = needsYou(props.dash?.sessions);
   return (
     <div class="wsc-dash-rail">
@@ -406,9 +476,32 @@ function Rail(props: { dash: DashboardSnapshot | null; onExpand: () => void }) {
       >
         »
       </button>
-      <span class={`wsc-dash-rail-val wsc-lvl-${reading.level}`} title="usage window">
-        {reading.text}
-      </span>
+      {plan.length > 0 ? (
+        plan.map((r) => (
+          <div
+            key={r.key}
+            class="wsc-dash-rail-plan"
+            title={`${r.label}: ${r.pct}% used · ${formatResetAt(r.resetsAt, now)}`}
+          >
+            <span class={`wsc-dash-rail-pct wsc-lvl-${r.level}`}>{r.pct}%</span>
+            <div
+              class={`wsc-dash-rail-bar wsc-lvl-${r.level}`}
+              role="meter"
+              aria-label={`${r.label} usage`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.min(100, r.pct)}
+            >
+              <span style={{ height: `${barFill(r.pct)}%` }} />
+            </div>
+            <span class="wsc-dash-rail-key">{r.short}</span>
+          </div>
+        ))
+      ) : (
+        <span class={`wsc-dash-rail-val wsc-lvl-${reading.level}`} title="usage window">
+          {reading.text}
+        </span>
+      )}
       {waiting && (
         <span
           class="wsc-dash-light wsc-bg-waiting blink"
@@ -457,7 +550,12 @@ function DashboardView(props: {
         </p>
       ) : (
         <>
-          <UsageTop usage={dash.usage} scanning={dash.scanning} />
+          <PlanUsage limits={dash.planLimits} />
+          <UsageTop
+            usage={dash.usage}
+            scanning={dash.scanning}
+            hasPlan={planRows(dash.planLimits, now).length > 0}
+          />
           <section class="wsc-dash-section" aria-label="Sessions">
             <h3>
               Sessions <span class="wsc-muted">{dash.sessions.length}</span>

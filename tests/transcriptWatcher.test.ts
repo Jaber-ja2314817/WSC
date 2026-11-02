@@ -404,6 +404,45 @@ describe('TranscriptWatcher incremental reads', () => {
   });
 });
 
+describe('TranscriptWatcher project attribution', () => {
+  const withCwd = (line: string, cwd: string): string =>
+    JSON.stringify({ ...(JSON.parse(line) as object), cwd });
+
+  it('keeps usage in the session project when it cds into a subfolder', async () => {
+    await writeLines(mainPath(SA), [
+      toolUse(NOW - 5 * MIN, SA, 'toolu_p1', 'Read', { file_path: 'a.ts' }),
+      withCwd(toolUse(NOW - 4 * MIN, SA, 'toolu_p2', 'Read', { file_path: 'b.ts' }), `${CWD}/src`),
+    ]);
+    await makeWatcher().start();
+    const projects = extras().map((x) => x.usage?.projectName);
+    expect(projects).toEqual(['proj-a', 'proj-a']);
+    expect(new Set(events().map((e) => e.projectName))).toEqual(new Set(['proj-a']));
+  });
+
+  it('keeps a subagent running in a worktree in its parent session project', async () => {
+    await writeLines(mainPath(SA), [
+      toolUse(NOW - 5 * MIN, SA, 'toolu_task2', 'Agent', { subagent_type: 'researcher' }),
+    ]);
+    await mkdir(subDir(SA), { recursive: true });
+    const worktree = `${CWD}/.claude/worktrees/agent-sub0009`;
+    await writeLines(join(subDir(SA), 'agent-sub0009.jsonl'), [
+      JSON.stringify({
+        ...(JSON.parse(
+          withCwd(toolUse(NOW - 4 * MIN, SA, 'toolu_w1', 'Read', { file_path: 'x' }), worktree),
+        ) as object),
+        agentId: 'sub0009',
+        isSidechain: true,
+      }),
+    ]);
+    await makeWatcher().start();
+    const sub = extras().filter((x) => x.agentId === 'sub0009');
+    expect(sub.length).toBeGreaterThan(0);
+    expect(sub.every((x) => x.usage?.projectName === 'proj-a')).toBe(true);
+    const subEvents = events().filter((e) => e.agentId === 'sub0009');
+    expect(subEvents.every((e) => e.projectName === 'proj-a')).toBe(true);
+  });
+});
+
 describe('Station + watcher + dashboard ledger', () => {
   let station: Station | null = null;
 
@@ -537,5 +576,54 @@ describe('Station + watcher + dashboard ledger', () => {
     const dash = station.getDashboard();
     expect(dash.sessions.length).toBeGreaterThan(0);
     expect(dash.usage.weeklyTotal).toBeGreaterThan(0);
+  });
+});
+
+describe('Station plan limits', () => {
+  let station: Station | null = null;
+
+  afterEach(async () => {
+    await station?.stop();
+    station = null;
+  });
+
+  const raw = (pct: number, resetS: number) => ({
+    session_id: SA,
+    rate_limits: { five_hour: { used_percentage: pct, resets_at: resetS } },
+  });
+
+  it('shows status line limits on the dashboard and reports changes only', async () => {
+    const changes: unknown[] = [];
+    station = new Station({
+      version: 'test',
+      offline: true,
+      onSnapshot: () => undefined,
+      onPlanLimits: (l) => changes.push(l),
+    });
+    await station.start();
+    expect(station.getDashboard().planLimits).toBeUndefined();
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    station.ingestLimits(raw(12.5, reset), Date.now());
+    expect(station.getDashboard().planLimits?.fiveHour).toEqual({
+      usedPct: 12.5,
+      resetsAt: reset * 1000,
+    });
+    station.ingestLimits(raw(12.5, reset), Date.now() + 1);
+    station.ingestLimits({ rate_limits: 'garbage' }, Date.now() + 2);
+    expect(changes).toHaveLength(1);
+    station.ingestLimits(raw(13, reset), Date.now() + 3);
+    expect(changes).toHaveLength(2);
+  });
+
+  it('starts from persisted limits', async () => {
+    const planLimits = { updatedAt: 1, sevenDay: { usedPct: 40, resetsAt: Date.now() + DAY } };
+    station = new Station({
+      version: 'test',
+      offline: true,
+      onSnapshot: () => undefined,
+      planLimits,
+    });
+    await station.start();
+    expect(station.getDashboard().planLimits).toEqual(planLimits);
   });
 });

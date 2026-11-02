@@ -1,5 +1,5 @@
 // Plays the scripted demo (src/shared/demoScript.ts) in real time, looping with fresh ids.
-import type { TokenUsage, TranscriptExtras } from '@shared/dashboardTypes';
+import type { PlanLimits, TokenUsage, TranscriptExtras } from '@shared/dashboardTypes';
 import { buildDemoScript, DEMO_DURATION_MS } from '@shared/demoScript';
 import { ORCHESTRATOR_ID, type StationEvent } from '@shared/types';
 
@@ -85,4 +85,20 @@ export function demoUsageExtras(evs: StationEvent[]): TranscriptExtras[] {
     });
   }
   return out;
+}
+
+/**
+ * Made-up plan usage for demo mode: the 5-hour bar climbs from 38 % into the warning band over
+ * a few minutes so the colours can be checked; the weekly bar sits at 61 %.
+ */
+export function demoPlanLimits(now: number, startedAt: number): PlanLimits {
+  const elapsedS = Math.max(0, (now - startedAt) / 1000);
+  return {
+    updatedAt: now,
+    fiveHour: {
+      usedPct: Math.min(97, Math.round(38 + elapsedS / 4)),
+      resetsAt: startedAt + (2 * 60 + 14) * 60_000,
+    },
+    sevenDay: { usedPct: 61, resetsAt: startedAt + 3 * 24 * 3_600_000 + 5 * 3_600_000 },
+  };
 }

@@ -155,8 +155,31 @@ export interface UsageStats {
   weeklyCostUsd?: number;
 }
 
+/** One plan usage window as Claude Code reports it (status line `rate_limits`). */
+export interface PlanWindow {
+  /** Percent of the window used, 0–100, exactly as Claude Code reports it. */
+  usedPct: number;
+  /** Epoch ms when the window resets. */
+  resetsAt: number;
+}
+
+/**
+ * The real plan usage (what the Claude app and /usage show), forwarded by WSC's status line
+ * bridge. Only percentages and reset times — never anything else from the status line input.
+ */
+export interface PlanLimits {
+  /** The rolling 5-hour "current session" window. */
+  fiveHour?: PlanWindow;
+  /** The 7-day window across all models. */
+  sevenDay?: PlanWindow;
+  /** Epoch ms of the newest update. */
+  updatedAt: number;
+}
+
 export interface DashboardSnapshot {
   generatedAt: number;
+  /** Real plan usage from Claude Code's status line; absent until the first update arrives. */
+  planLimits?: PlanLimits;
   /** True while the startup scan of older transcripts is still running. */
   scanning: boolean;
   usage: UsageStats;

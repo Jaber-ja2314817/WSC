@@ -8,6 +8,8 @@ import {
   type DashboardOptions,
   type HourBucket,
   type ModelPrice,
+  type PlanLimits,
+  type PlanWindow,
   type TokenUsage,
   type UsageRecord,
   type UsageStats,
@@ -332,4 +334,32 @@ export function computeUsageStats(book: UsageBook, opts: DashboardOptions): Usag
   const weeklyCost = costFor(usageByModel(weekRecords), opts.prices);
   if (weeklyCost !== undefined) stats.weeklyCostUsd = weeklyCost;
   return stats;
+}
+
+/**
+ * Folds a plan limits update into what is known. The newer update wins per window; a window it
+ * leaves out is kept while it has not reset yet (Claude Code drops a window once it resets).
+ * An update older than the known one is ignored.
+ */
+export function mergePlanLimits(
+  prev: PlanLimits | undefined,
+  next: PlanLimits,
+  now: number,
+): PlanLimits {
+  if (prev && next.updatedAt < prev.updatedAt) return prev;
+  const keep = (w: PlanWindow | undefined): PlanWindow | undefined =>
+    w && w.resetsAt > now ? w : undefined;
+  const out: PlanLimits = { updatedAt: next.updatedAt };
+  const five = next.fiveHour ?? keep(prev?.fiveHour);
+  const seven = next.sevenDay ?? keep(prev?.sevenDay);
+  if (five) out.fiveHour = { ...five };
+  if (seven) out.sevenDay = { ...seven };
+  return out;
+}
+
+/** True when two plan limits show the same numbers (ignores updatedAt). */
+export function samePlanLimits(a: PlanLimits | undefined, b: PlanLimits | undefined): boolean {
+  const same = (x?: PlanWindow, y?: PlanWindow): boolean =>
+    x === y || (!!x && !!y && x.usedPct === y.usedPct && x.resetsAt === y.resetsAt);
+  return !!a && !!b && same(a.fiveHour, b.fiveHour) && same(a.sevenDay, b.sevenDay);
 }

@@ -24,6 +24,9 @@ import {
   statusTone,
   timelineIcon,
   usageLevel,
+  barFill,
+  formatResetAt,
+  planRows,
 } from '../src/renderer/panels/dashboardModel';
 
 const HOUR = 3_600_000;
@@ -240,5 +243,50 @@ describe('hourly chart stacking', () => {
     expect(segmentHeights([5], 0, 96)).toEqual([0]);
     // A tiny bar still shows one pixel.
     expect(segmentHeights([1], 1_000_000, 96)).toEqual([1]);
+  });
+});
+
+describe('plan usage bars', () => {
+  const T = new Date(2026, 10, 2, 9, 0, 0).getTime();
+  const limits = {
+    updatedAt: T,
+    fiveHour: { usedPct: 77.6, resetsAt: T + 2 * 3_600_000 + 14 * 60_000 },
+    sevenDay: { usedPct: 23, resetsAt: new Date(2026, 10, 5, 14, 0, 0).getTime() },
+  };
+
+  it('rows: current session first, rounded %, warning levels', () => {
+    const rows = planRows(limits, T);
+    expect(rows.map((r) => [r.key, r.label, r.pct, r.level, r.reset])).toEqual([
+      ['fiveHour', 'Current session', 78, 'warn', false],
+      ['sevenDay', 'Weekly · all models', 23, 'ok', false],
+    ]);
+    expect(
+      planRows({ updatedAt: T, sevenDay: { usedPct: 95, resetsAt: T + 1 } }, T)[0],
+    ).toMatchObject({ key: 'sevenDay', pct: 95, level: 'danger' });
+    expect(planRows(undefined, T)).toEqual([]);
+  });
+
+  it('a window whose reset time has passed reads 0 %', () => {
+    const [five] = planRows(limits, limits.fiveHour.resetsAt);
+    expect(five).toMatchObject({ pct: 0, level: 'ok', reset: true });
+  });
+
+  it('formatResetAt: countdown within a day, weekday + time beyond', () => {
+    expect(formatResetAt(limits.fiveHour.resetsAt, T)).toBe('resets in 2h 14m');
+    expect(formatResetAt(limits.sevenDay.resetsAt, T)).toBe('resets Thu 14:00');
+    expect(formatResetAt(T - 1, T)).toMatch(/^reset/);
+  });
+
+  it('barFill: 0 stays empty, any usage shows a sliver, capped at 100', () => {
+    expect(barFill(0)).toBe(0);
+    expect(barFill(1)).toBe(2);
+    expect(barFill(55)).toBe(55);
+    expect(barFill(130)).toBe(100);
+  });
+
+  it('railReading prefers the real 5-hour plan %', () => {
+    const usage = { windowTotal: 1_234_567 } as UsageStats;
+    expect(railReading(usage, limits, T)).toEqual({ text: '78%', level: 'warn' });
+    expect(railReading(undefined, limits, T)).toEqual({ text: '78%', level: 'warn' });
   });
 });

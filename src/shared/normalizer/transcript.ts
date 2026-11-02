@@ -119,7 +119,9 @@ function lineHead(rec: Rec, ctx: TranscriptContext): LineHead | undefined {
   if (typeof sessionId !== 'string' || !sessionId) return undefined;
   const lineAgent = str(rec['agentId']);
   const agentId = lineAgent ? stripAgentPrefix(lineAgent) : ctx.agentId;
-  return { ts, sessionId, agentId, cwd: str(rec['cwd']) ?? ctx.cwd, rank: ctx.usageRank };
+  // The session's own cwd (its project) wins over a line's cwd: a session that cds into a
+  // subfolder, or a subagent in a worktree, still belongs to the project it started in.
+  return { ts, sessionId, agentId, cwd: ctx.cwd ?? str(rec['cwd']), rank: ctx.usageRank };
 }
 
 function baseExtras(rec: Rec, head: LineHead): TranscriptExtras {

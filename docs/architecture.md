@@ -26,7 +26,7 @@ Every input comes in through an adapter. Adapters emit raw records, and the norm
 
 A future Codex adapter (reading `~/.codex/sessions/`) plugs in here without touching the store or the renderer.
 
-**Rule: raw Claude Code formats are parsed only in `src/shared/normalizer/`** (`hook.ts` and `transcript.ts`). Everything downstream sees only `StationEvent`. Both normalizers produce the same dedupe ids (for example `${session}:tool:${toolUseId}:start`), so a tool call reported by a hook and by a transcript counts once. When Claude Code changes, fix the normalizer and update `docs/claude-code-integration.md`.
+**Rule: raw Claude Code formats are parsed only in `src/shared/normalizer/`** (`hook.ts`, `transcript.ts` and `statusline.ts`). Everything downstream sees only `StationEvent`. Both normalizers produce the same dedupe ids (for example `${session}:tool:${toolUseId}:start`), so a tool call reported by a hook and by a transcript counts once. When Claude Code changes, fix the normalizer and update `docs/claude-code-integration.md`.
 
 ## Modules
 
@@ -35,7 +35,7 @@ A future Codex adapter (reading `~/.codex/sessions/`) plugs in here without touc
 | Module              | Responsibility                                                                                                                                                                                     |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `types.ts`          | `StationEvent`, `ToolCategory`, agent, session and project state, and `StationSnapshot`                                                                                                            |
-| `normalizer/`       | `hook.ts` handles hook payloads; `transcript.ts` handles transcript lines and subagent meta. Both are tolerant and never throw                                                                     |
+| `normalizer/`       | `hook.ts` handles hook payloads; `transcript.ts` handles transcript lines and subagent meta; `statusline.ts` handles the status line `rate_limits`. All are tolerant and never throw               |
 | `toolCategories.ts` | tool name → category, with user overrides. Unknown tools map to `other`                                                                                                                            |
 | `redact.ts`         | sanitized tool summaries (basenames, hostnames, truncated and redacted commands) for panels and bubbles                                                                                            |
 | `projects.ts`       | working directory → stable `projectId` (12-hex FNV-1a hash) and a display name (folder basename)                                                                                                   |
@@ -47,7 +47,7 @@ A future Codex adapter (reading `~/.codex/sessions/`) plugs in here without touc
 | `themeSchema.ts`    | zod schema for `theme.json` and `validateTheme`                                                                                                                                                    |
 | `settings.ts`       | settings schema and defaults                                                                                                                                                                       |
 | `demoScript.ts`     | the scripted demo run, covering two projects with a third added live                                                                                                                               |
-| `dashboardTypes.ts` | dashboard contract: `TokenUsage`, `UsageRecord`, `TranscriptExtras`, `SessionSummary`, `TimelineStep`, `UsageStats`, `DashboardSnapshot`                                                           |
+| `dashboardTypes.ts` | dashboard contract: `TokenUsage`, `UsageRecord`, `TranscriptExtras`, `SessionSummary`, `TimelineStep`, `UsageStats`, `PlanLimits`, `DashboardSnapshot`                                             |
 | `usage.ts`          | `UsageBook` (usage deduped by `message.id` + `requestId`), usage-window maths, burn rate, projection, weekly and hourly totals, optional cost from user prices                                     |
 | `dashboard.ts`      | `SessionLedger`: per-session history (project, branch, models, timeline, usage) and `describeStep`. Status comes from the store first, so the dashboard and the station agree                      |
 | `ipc.ts`            | IPC channel names and the `window.wsc` API type                                                                                                                                                    |
@@ -122,6 +122,8 @@ The store holds the truth, and the director animates toward it.
 ## Dashboard data flow
 
 - **Station events** (hooks, backfill, live transcript lines, demo) go to both the `StationStore` and the `SessionLedger`. Live transcript events reach the store only when they are less than 30 minutes old, so old history never floods the station; the startup scan feeds only the ledger.
+- **Plan usage** (the real % the Claude app shows) is not in transcripts or hooks. Claude Code passes it to the status line command as `rate_limits`; WSC's status line bridge (`plugin/statusline/statusline.mjs`) POSTs only `session_id` + `rate_limits` to `/v1/limits` on 127.0.0.1. `normalizer/statusline.ts` parses it, `mergePlanLimits` (`usage.ts`) keeps the newest per window, and the station puts it on `DashboardSnapshot.planLimits`. The last numbers are saved in `state.json` so the bars show after a restart.
+- **Project of a line:** a transcript line belongs to its session's project (the first `cwd` of the session), not to the line's own `cwd`, so a `cd` into a subfolder or a subagent in a worktree does not create a new project.
 - **Usage** exists only in transcripts. Each assistant message is written once per content block with identical usage, so it is counted once by `message.id` + `requestId`.
 - **Status** shown on a card comes from the store's agents when the store has the session (working, waiting), and from the ledger otherwise (turn ended → waiting for you; `idleMinutes` without activity → idle; `SessionEnd` → ended).
 - **Pushes:** the dashboard snapshot is rebuilt at most every 500 ms when something changed and every 5 s for timers, and is not sent when unchanged. Timelines are fetched on demand (`getTimeline`).

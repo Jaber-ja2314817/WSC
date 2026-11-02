@@ -10,7 +10,9 @@ import {
   costFor,
   floorHour,
   hourlyBuckets,
+  mergePlanLimits,
   priceFor,
+  samePlanLimits,
 } from '../src/shared/usage';
 
 // 2026-01-01T00:00:00Z — synthetic clock.
@@ -277,5 +279,44 @@ describe('cost', () => {
     expect(computeUsageStats(book, opts(now)).weeklyCostUsd).toBeUndefined();
     expect(costFor({}, {})).toBeUndefined();
     expect(costFor({}, { x: p })).toBe(0);
+  });
+});
+
+describe('mergePlanLimits', () => {
+  const T = 1_800_000_000_000;
+  const w = (usedPct: number, resetsAt: number) => ({ usedPct, resetsAt });
+
+  it('takes a newer update per window and keeps a missing window until it resets', () => {
+    const prev = { updatedAt: T, fiveHour: w(10, T + 1000), sevenDay: w(40, T + 9000) };
+    const next = { updatedAt: T + 10, fiveHour: w(12, T + 1000) };
+    expect(mergePlanLimits(prev, next, T + 10)).toEqual({
+      updatedAt: T + 10,
+      fiveHour: w(12, T + 1000),
+      sevenDay: w(40, T + 9000),
+    });
+    // The weekly window has reset by now: it is dropped, not carried forward.
+    expect(mergePlanLimits(prev, next, T + 9000)).toEqual({
+      updatedAt: T + 10,
+      fiveHour: w(12, T + 1000),
+    });
+  });
+
+  it('ignores an update older than what is known (out of order)', () => {
+    const prev = { updatedAt: T + 50, fiveHour: w(30, T + 1000) };
+    const late = { updatedAt: T, fiveHour: w(5, T + 1000) };
+    expect(mergePlanLimits(prev, late, T + 60)).toBe(prev);
+  });
+
+  it('starts from nothing', () => {
+    const next = { updatedAt: T, sevenDay: w(1, T + 5) };
+    expect(mergePlanLimits(undefined, next, T)).toEqual(next);
+  });
+
+  it('samePlanLimits compares numbers, not updatedAt', () => {
+    const a = { updatedAt: T, fiveHour: w(1, 2) };
+    expect(samePlanLimits(a, { updatedAt: T + 1, fiveHour: w(1, 2) })).toBe(true);
+    expect(samePlanLimits(a, { updatedAt: T, fiveHour: w(2, 2) })).toBe(false);
+    expect(samePlanLimits(a, { updatedAt: T, fiveHour: w(1, 2), sevenDay: w(1, 2) })).toBe(false);
+    expect(samePlanLimits(undefined, a)).toBe(false);
   });
 });

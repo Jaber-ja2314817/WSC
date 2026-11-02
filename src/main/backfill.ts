@@ -179,7 +179,8 @@ async function backfillSession(
     const subCtx: TranscriptContext = {
       sessionId,
       agentId,
-      cwd: firstCwd(subLines) ?? cwd,
+      // The session's project, even when the subagent ran in a worktree.
+      cwd,
       toolNames: new Map(),
       ...(opts.toolOverrides ? { toolOverrides: opts.toolOverrides } : {}),
       ...(opts.fullToolDetails ? { fullToolDetails: true } : {}),
@@ -187,7 +188,7 @@ async function backfillSession(
     const subEvents = subLines.flatMap((l) => normalizeTranscriptLine(l, subCtx));
     const spawnTs = subEvents.length > 0 ? Math.min(...subEvents.map((e) => e.ts)) : mtime;
     events.push(
-      ...normalizeSubagentMeta(meta, { sessionId, agentId, cwd: subCtx.cwd ?? cwd, ts: spawnTs }),
+      ...normalizeSubagentMeta(meta, { sessionId, agentId, cwd: cwd, ts: spawnTs }),
       ...subEvents,
     );
     agents++;
@@ -197,8 +198,8 @@ async function backfillSession(
         id: `${sessionId}:agent:${agentId}:finish`,
         ts: mtime,
         source: 'transcript',
-        projectId: projectIdFor(subCtx.cwd ?? cwd),
-        projectName: projectNameFor(subCtx.cwd ?? cwd),
+        projectId: projectIdFor(cwd),
+        projectName: projectNameFor(cwd),
         sessionId,
         agentId,
         parentAgentId: ORCHESTRATOR_ID,

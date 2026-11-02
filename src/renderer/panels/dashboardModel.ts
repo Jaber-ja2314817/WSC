@@ -3,6 +3,8 @@ import {
   tokenTotal,
   type DashStatus,
   type HourBucket,
+  type PlanLimits,
+  type PlanWindow,
   type SessionSummary,
   type TimelineKind,
   type TokenUsage,
@@ -135,12 +137,80 @@ export function filledCells(pct: number, cells: number): number {
   return Math.min(cells, Math.max(1, Math.round((pct / 100) * cells)));
 }
 
-/** What the collapsed rail shows: window % when a limit is set, else the window token total. */
-export function railReading(usage: UsageStats | undefined): { text: string; level: UsageLevel } {
+/**
+ * What the collapsed rail shows: the real 5-hour plan % when known, else the window % when a
+ * token limit is set, else the window token total.
+ */
+export function railReading(
+  usage: UsageStats | undefined,
+  limits?: PlanLimits,
+  now: number = Date.now(),
+): { text: string; level: UsageLevel } {
+  const plan = planRows(limits, now)[0];
+  if (plan) return { text: `${plan.pct}%`, level: plan.level };
   if (!usage) return { text: '–', level: 'ok' };
   const pct = percent(usage.windowTotal, usage.windowLimit);
   if (pct !== undefined) return { text: `${pct}%`, level: usageLevel(pct) };
   return { text: formatTokens(usage.windowTotal), level: 'ok' };
+}
+
+// ── plan usage (real, from Claude Code's status line) ────────────────────────
+
+/** Plan usage older than this is flagged as possibly out of date. */
+export const PLAN_STALE_MS = 30 * 60_000;
+
+export interface PlanRow {
+  key: 'fiveHour' | 'sevenDay';
+  label: string;
+  /** Short label for the collapsed rail. */
+  short: string;
+  /** Whole percent used (Claude Code's number, rounded); 0 once the window has reset. */
+  pct: number;
+  level: UsageLevel;
+  resetsAt: number;
+  /** The window's reset time has passed: a fresh window starts with the next message. */
+  reset: boolean;
+}
+
+function planRow(
+  key: PlanRow['key'],
+  label: string,
+  short: string,
+  w: PlanWindow,
+  now: number,
+): PlanRow {
+  const reset = w.resetsAt <= now;
+  const pct = reset ? 0 : Math.max(0, Math.round(w.usedPct));
+  return { key, label, short, pct, level: usageLevel(pct), resetsAt: w.resetsAt, reset };
+}
+
+/** Bars to draw, current session first. Empty without plan limits. */
+export function planRows(limits: PlanLimits | undefined, now: number): PlanRow[] {
+  if (!limits) return [];
+  const rows: PlanRow[] = [];
+  if (limits.fiveHour) {
+    rows.push(planRow('fiveHour', 'Current session', '5h', limits.fiveHour, now));
+  }
+  if (limits.sevenDay) {
+    rows.push(planRow('sevenDay', 'Weekly · all models', '7d', limits.sevenDay, now));
+  }
+  return rows;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** "resets in 2h 14m" within a day, else "resets Thu 14:00" (local time). */
+export function formatResetAt(resetsAt: number, now: number): string {
+  const ms = resetsAt - now;
+  if (ms <= 0) return 'reset · new window on next message';
+  if (ms < 24 * 3_600_000) return `resets in ${formatCountdown(ms)}`;
+  return `resets ${WEEKDAYS[new Date(resetsAt).getDay()]} ${clockHM(resetsAt)}`;
+}
+
+/** Bar fill width in percent (0–100); any usage shows a sliver. */
+export function barFill(pct: number): number {
+  if (!(pct > 0)) return 0;
+  return Math.min(100, Math.max(2, pct));
 }
 
 // ── sessions ─────────────────────────────────────────────────────────────────
@@ -391,3 +461,6 @@ export function segmentHeights(values: readonly number[], max: number, height: n
 export function hourLabel(ts: number): string {
   return `${String(new Date(ts).getHours()).padStart(2, '0')}h`;
 }
+
+/** Subagent chips shown on a session card before folding the rest into "+N". */
+export const CARD_CHIP_MAX = 4;

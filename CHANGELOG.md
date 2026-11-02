@@ -23,6 +23,14 @@ All notable changes to this project are documented here. The format follows
 - **Auto-launch:** the `SessionStart` hook starts WSC in the background when it isn't running and
   hands it the new session; a running WSC just shows the new session. Settings
   `launchOnSessionStart` (on) and `focusOnSessionStart` (off), env `WSC_AUTOLAUNCH=0`.
+- **Live plan usage bars via a status line bridge:** `npm run statusline:install` /
+  `statusline:uninstall` add WSC's status line script to `~/.claude/settings.json` (with a backup,
+  idempotent; an existing status line is chained and restored on uninstall). It forwards only the
+  session id and `rate_limits` (5-hour and 7-day used % and reset times) to the local app.
+  The dashboard shows them at the top like the Claude app ("Current session 42% used · resets
+  in 2h 14m", "Weekly · all models"), with amber from 75 % and red from 90 %. The collapsed
+  rail shows both as vertical bars. The last numbers are kept across restarts; `npm run demo`
+  shows sample bars.
 - `npm run hooks:install` / `hooks:uninstall`: merge WSC's hooks into `~/.claude/settings.json`
   (with a backup, idempotent) or remove only them, for setups without the plugin.
 - New settings: `lookbackDays`, `idleMinutes`, `usageWindowHours`, `windowTokenLimit`,
@@ -42,6 +50,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Token usage and the hourly chart no longer split a project into fake ones (`src`,
+  `agent-a27…`) when a session `cd`s into a subfolder or a subagent runs in a worktree: usage
+  stays with the project the session started in.
+- A session card with many subagents shows four chips and "+N" instead of a long list.
 - A new project zone unfolds again when it appears (it used to pop in).
 - A finished subagent no longer flips back to "thinking" when its hand-back result is written.
 - Two quick turns in a row stay two prompts and two turn ends on the timeline.

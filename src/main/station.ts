@@ -6,13 +6,15 @@ import type {
   DashboardOptions,
   DashboardSnapshot,
   ModelPrice,
+  PlanLimits,
   TimelineStep,
 } from '@shared/dashboardTypes';
-import { hookSessionInfo, normalizeHookPayload } from '@shared/normalizer';
+import { hookSessionInfo, normalizeHookPayload, normalizeRateLimits } from '@shared/normalizer';
+import { mergePlanLimits, samePlanLimits } from '@shared/usage';
 import { StationStore } from '@shared/store';
 import type { StationEvent, StationSnapshot, ToolCategory } from '@shared/types';
 import { backfillRecent, backfillTranscript } from './backfill';
-import { DemoPlayer, demoUsageExtras } from './demo';
+import { DemoPlayer, demoPlanLimits, demoUsageExtras } from './demo';
 import { readRuntimeFile, removeRuntimeFile, writeRuntimeFile } from './runtimeFile';
 import { startIngestServer, type IngestServer, type StationCommand } from './server';
 import { TranscriptWatcher, type WatcherBatch } from './transcriptWatcher';
@@ -52,6 +54,10 @@ export interface StationOptions {
   onCommand?: (cmd: StationCommand) => unknown;
   /** Dashboard snapshots (≤ 2/s when changed, every 5 s for timers, never when unchanged). */
   onDashboard?: (dash: DashboardSnapshot) => void;
+  /** Last known plan usage (persisted by the caller), shown until a fresh update arrives. */
+  planLimits?: PlanLimits;
+  /** Plan usage numbers changed (for persisting; not called when only updatedAt moves). */
+  onPlanLimits?: (limits: PlanLimits) => void;
   /** A live SessionStart hook arrived over HTTP. */
   onSessionStart?: () => void;
   /** Initial tunables (settings); change later with `configure`. */
@@ -104,6 +110,9 @@ export class Station {
   private lastDashAt = 0;
   private lastDashJson = '';
   private scanDone: Promise<void> = Promise.resolve();
+  /** Real plan usage from the status line bridge. */
+  private planLimits: PlanLimits | undefined;
+  private demoStartedAt = Date.now();
 
   private tuning: StationTuning = {};
   /** While paused, events are still ingested but no snapshots are pushed. */
@@ -111,6 +120,7 @@ export class Station {
 
   constructor(private readonly opts: StationOptions) {
     this.currentMode = opts.mode ?? 'live';
+    this.planLimits = opts.planLimits;
     if (opts.tuning) this.configure(opts.tuning);
     this.unsubscribe = this.store.subscribe(() => this.markDirty());
   }
@@ -145,6 +155,7 @@ export class Station {
       token: this.token,
       version: this.opts.version,
       onPayload: (raw, receivedAt) => this.ingestHook(raw, receivedAt, true),
+      onLimits: (raw, receivedAt) => this.ingestLimits(raw, receivedAt),
       ...(this.opts.onCommand ? { onCommand: this.opts.onCommand } : {}),
     });
     writeRuntimeFile({
@@ -226,10 +237,28 @@ export class Station {
     this.ingestHook(raw, Date.now(), false);
   }
 
+  /** A status line `rate_limits` update (real plan usage). */
+  ingestLimits(raw: unknown, receivedAt: number): void {
+    const next = normalizeRateLimits(raw, receivedAt);
+    if (!next) return;
+    const merged = mergePlanLimits(this.planLimits, next, receivedAt);
+    const changed = !samePlanLimits(this.planLimits, merged);
+    this.planLimits = merged;
+    if (!changed) return;
+    this.dashDirty = true;
+    this.opts.onPlanLimits?.(merged);
+    this.pushDashboard();
+  }
+
   /** The dashboard as of now. */
   getDashboard(): DashboardSnapshot {
-    const snap = this.activeLedger().snapshot(this.store.snapshot(), this.dashboardOptions());
+    const now = Date.now();
+    const opts = this.dashboardOptions();
+    const snap = this.activeLedger().snapshot(this.store.snapshot(), opts);
     snap.scanning = this.currentMode === 'live' && (this.watcher?.scanning ?? false);
+    const limits =
+      this.currentMode === 'live' ? this.planLimits : demoPlanLimits(now, this.demoStartedAt);
+    if (limits) snap.planLimits = limits;
     return snap;
   }
 
@@ -310,6 +339,7 @@ export class Station {
 
   private playDemo(): void {
     this.demo?.stop();
+    this.demoStartedAt = Date.now();
     this.demo = new DemoPlayer((evs) => this.ingestDemo(evs));
     this.demo.start();
   }

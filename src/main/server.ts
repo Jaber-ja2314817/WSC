@@ -10,6 +10,8 @@ export interface IngestServerOptions {
   version?: string;
   host?: '127.0.0.1';
   onPayload: (raw: unknown, receivedAt: number) => void;
+  /** `POST /v1/limits` from the status line bridge: `{ session_id, rate_limits }`. */
+  onLimits?: (raw: unknown, receivedAt: number) => void;
   /** `POST /v1/command` from the /station launcher. The result is sent back as JSON. */
   onCommand?: (cmd: StationCommand) => unknown;
 }
@@ -111,9 +113,21 @@ export async function startIngestServer(opts: IngestServerOptions): Promise<Inge
     }
     const isEvents = url === '/v1/events';
     const isCommand = url === '/v1/command' && opts.onCommand !== undefined;
-    if (req.method !== 'POST' || (!isEvents && !isCommand)) return reject(res, 404, req);
+    const isLimits = url === '/v1/limits' && opts.onLimits !== undefined;
+    if (req.method !== 'POST' || (!isEvents && !isCommand && !isLimits)) {
+      return reject(res, 404, req);
+    }
 
     readJson(req, res, (payload) => {
+      if (isLimits) {
+        send(res, 204);
+        try {
+          opts.onLimits?.(payload, Date.now());
+        } catch {
+          // Never let a consumer bug take down the server.
+        }
+        return;
+      }
       if (isCommand) {
         const cmd = parseCommand(payload);
         if (!cmd) return reject(res, 400);

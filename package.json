@@ -28,7 +28,9 @@
     "package:linux": "npm run build && electron-builder --linux",
     "test:e2e": "electron-vite build && playwright test",
     "hooks:install": "node scripts/install-hooks.mjs install",
-    "hooks:uninstall": "node scripts/install-hooks.mjs uninstall"
+    "hooks:uninstall": "node scripts/install-hooks.mjs uninstall",
+    "statusline:install": "node scripts/install-statusline.mjs install",
+    "statusline:uninstall": "node scripts/install-statusline.mjs uninstall"
   },
   "devDependencies": {
     "@electron-toolkit/tsconfig": "^2.0.0",

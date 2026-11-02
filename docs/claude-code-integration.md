@@ -3,7 +3,7 @@
 **Verified against:** Claude Code **2.1.294**, on 2026-10-08 (live). Re-checked for **2.1.308** on 2026-10-22: hook event names and fields against the docs, transcript shapes locally (§7). Live hook run on 2.1.308: see §8.
 **Sources:**
 
-- Official docs at `code.claude.com/docs`: `hooks`, `hooks-guide`, `plugins/*`, `skills`, `sub-agents`, `memory`.
+- Official docs at `code.claude.com/docs`: `hooks`, `hooks-guide`, `plugins/*`, `skills`, `sub-agents`, `memory`, `statusline` (§11, 2026-11-02).
 - Local inspection of transcript file _shapes_: keys and types only, no content.
 
 Facts are tagged by where they come from:
@@ -255,3 +255,23 @@ Setup: two headless `claude -p --plugin-dir ./plugin` sessions ran at the same t
 - **Arguments:** `--from-hook --hook-payload=<base64url of the raw SessionStart JSON>` (omitted above 16 KB). The app feeds the payload through `normalizeHookPayload` like any other hook, so the session shows up before its transcript exists. `--from-hook` keeps the window from taking focus unless `focusOnSessionStart` is on.
 - **One instance:** a `launching.json` marker blocks a second launch for 15 s (older markers are stale and replaced), and Electron's single-instance lock forwards a racing launch's argv to the running app.
 - **Opt out:** setting `launchOnSessionStart: false` or env `WSC_AUTOLAUNCH=0`.
+
+## 11. Status line bridge: real plan usage [docs; verified against the docs on 2026-11-02]
+
+The plan usage the Claude app shows (the 5-hour and 7-day limits) is not in hooks or transcripts. Claude Code only hands it to the **status line** command, as part of the JSON object it pipes to that command's stdin on every status line refresh. The status line is therefore the only local source of the real plan %. Plugins can't define a status line, so `npm run statusline:install` puts `plugin/statusline/statusline.mjs` into the user's `settings.json` (`scripts/install-statusline.mjs`, merge logic in `scripts/statusline-settings.mjs`).
+
+Fields we read from the status line input (everything else is ignored and never leaves the script):
+
+| Field                                   | Type                           | Notes                                                         |
+| --------------------------------------- | ------------------------------ | ------------------------------------------------------------- |
+| `session_id`                            | string                         | Passed through when it is a string.                           |
+| `rate_limits`                           | object                         | Absent for non-subscribers and before the first API response. |
+| `rate_limits.five_hour.used_percentage` | number, 0–100                  | Each window may be absent.                                    |
+| `rate_limits.five_hour.resets_at`       | number, Unix epoch **seconds** |                                                               |
+| `rate_limits.seven_day.used_percentage` | number, 0–100                  |                                                               |
+| `rate_limits.seven_day.resets_at`       | number, Unix epoch **seconds** |                                                               |
+
+- **What is sent** [decision]: when `rate_limits` is an object, `POST http://127.0.0.1:<port>/v1/limits` with `x-wsc-token` and body `{"session_id": "…", "rate_limits": {…}}` (`session_id` omitted when missing). `rate_limits` is passed as is; the app validates it. Nothing else from the input is sent. No `rate_limits` → no request. WSC not running → nothing happens; the bridge never launches the app.
+- **Contract** (like the hook forwarder): node builtins only, never writes to stderr, always exits 0, 250 ms POST timeout and a 300 ms hard deadline.
+- **Chaining an existing status line** [decision]: Claude Code runs one status line command. If the user already has one, the installer rewrites it to `node "<script>" --then <base64url of the original command>` and keeps the other keys (`padding`, `refreshInterval`, …). The bridge runs the original command through the shell with the same stdin bytes, concurrently with the POST, and prints its stdout (the only stdout the bridge ever writes); its stderr is discarded. The command gets 3 s; on timeout or a spawn error the bridge prints nothing. Without `--then` the bridge prints nothing, so installing it alone leaves an empty status line. `npm run statusline:uninstall` restores the original command exactly, or removes `statusLine` when there was none.
+- A WSC status line is recognised by `plugin/statusline/statusline.mjs` in its command (backslashes normalised), the same way hook entries are recognised.

@@ -130,6 +130,20 @@ npm run hooks:uninstall   # removes only WSC's hook entries; the app stays insta
 Both are idempotent and accept `-- --settings <path>`. Install refuses while the `wsc@wsc` plugin
 is enabled, because both copies of each hook would fire (`--force` overrides).
 
+### Plan usage bars (status line bridge)
+
+Claude Code gives your real plan usage (the 5-hour and weekly limits the Claude app shows) only
+to the status line command, and plugins can't add one, so install the bridge into your settings
+to see those bars in WSC (plugin users too):
+
+```sh
+npm run statusline:install     # backs up settings.json; an existing status line keeps working
+npm run statusline:uninstall   # restores your previous status line exactly
+```
+
+It sends only the session id and the `rate_limits` numbers to the local app, prints nothing of its
+own and accepts `-- --settings <path>` too.
+
 Having trouble (port in use, hooks not firing, stale lock file, app not launching)? See
 [docs/troubleshooting.md](docs/troubleshooting.md).
 

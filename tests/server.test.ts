@@ -206,3 +206,58 @@ describe('ingest server /v1/command', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('ingest server /v1/limits', () => {
+  let limits: unknown[] = [];
+  const startWithLimits = async (): Promise<IngestServer> => {
+    limits = [];
+    payloads = [];
+    server = await startIngestServer({
+      port: 0,
+      token: TOKEN,
+      onPayload: (p) => payloads.push(p),
+      onLimits: (p) => limits.push(p),
+    });
+    return server;
+  };
+  const body = { session_id: 'sess-1', rate_limits: { five_hour: { used_percentage: 5 } } };
+
+  it('delivers status line limits, not as hook events', async () => {
+    const s = await startWithLimits();
+    const res = await fetch(url(s, '/v1/limits'), {
+      method: 'POST',
+      headers: { 'x-wsc-token': TOKEN, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(204);
+    expect(limits).toEqual([body]);
+    expect(payloads).toEqual([]);
+    expect(s.stats().received).toBe(0);
+  });
+
+  it('requires the token and rejects browser origins', async () => {
+    const s = await startWithLimits();
+    const noToken = await fetch(url(s, '/v1/limits'), {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    expect(noToken.status).toBe(401);
+    const origin = await fetch(url(s, '/v1/limits'), {
+      method: 'POST',
+      headers: { 'x-wsc-token': TOKEN, origin: 'https://example.com' },
+      body: JSON.stringify(body),
+    });
+    expect(origin.status).toBe(403);
+    expect(limits).toEqual([]);
+  });
+
+  it('is a 404 without a limits handler', async () => {
+    const s = await start();
+    const res = await fetch(url(s, '/v1/limits'), {
+      method: 'POST',
+      headers: { 'x-wsc-token': TOKEN },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(404);
+  });
+});

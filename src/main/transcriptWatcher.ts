@@ -569,7 +569,10 @@ export class TranscriptWatcher {
   /** Remember the session's cwd from the first line that has one. */
   private ensureCwd(state: FileState, line: string): void {
     if (state.ctx.cwd) return;
-    const cwd = firstCwd([line]) ?? this.sessionCwd.get(state.sessionId);
+    // A subagent belongs to its session's project, even when it runs in a worktree.
+    const session = this.sessionCwd.get(state.sessionId);
+    const cwd =
+      state.kind === 'sub' ? (session ?? firstCwd([line])) : (firstCwd([line]) ?? session);
     if (!cwd) return;
     state.ctx.cwd = cwd;
     if (state.kind === 'main' && !this.sessionCwd.has(state.sessionId)) {

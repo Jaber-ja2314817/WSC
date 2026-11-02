@@ -285,6 +285,11 @@ if (!app.requestSingleInstanceLock()) {
         writeAppFlags(flags);
         pushStatus();
       },
+      ...(flags.planLimits ? { planLimits: flags.planLimits } : {}),
+      onPlanLimits: (limits) => {
+        flags.planLimits = limits;
+        writeAppFlags(flags);
+      },
       onCommand: handleCommand,
       onDashboard: (dash) => windows?.window?.webContents.send(IPC.dashboard, dash),
       onSessionStart: () => {

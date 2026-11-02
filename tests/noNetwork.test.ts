@@ -14,6 +14,7 @@ const NETWORK_CALL =
 /** file → reason. Every listed call must hit 127.0.0.1 (or open the user's own browser). */
 const ALLOWED: Record<string, string> = {
   'plugin/hooks/forward.mjs': 'forwards hook payloads to the local app on 127.0.0.1',
+  'plugin/statusline/statusline.mjs': 'forwards status line rate_limits to the app on 127.0.0.1',
   'plugin/scripts/launch.mjs': 'talks to the running app on 127.0.0.1 for /station',
   'src/main/station.ts': 'Test connection: self-request to its own /v1/health on 127.0.0.1',
   'src/main/index.ts': 'external https links open in the user browser (never fetched by the app)',
