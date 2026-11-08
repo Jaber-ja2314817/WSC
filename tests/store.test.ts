@@ -275,6 +275,136 @@ describe('StationStore', () => {
       expect(a?.finishedAt).toBeUndefined();
     });
 
+    it('a continued subagent finishes again with the same finish id', () => {
+      const finish = (ts: number) =>
+        store.apply(ev({ kind: 'agent_finish', id: 's:agent:a1:finish', agentId: 'a1', ts }));
+      store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
+      expect(finish(2000)).toBe(true);
+      store.apply(ev({ kind: 'tool_start', agentId: 'a1', ts: 3000, tool: tool('Read', 'read') }));
+      expect(finish(4000)).toBe(true);
+      const s = store.snapshot();
+      expect(sub(s, 'a1')).toMatchObject({ status: 'done', finishedAt: 4000 });
+      const finished = s.log.filter((l) => l.kind === 'agent_finish');
+      expect(finished).toHaveLength(2);
+      expect(new Set(finished.map((l) => l.id)).size).toBe(2);
+    });
+
+    it('a finish arriving as a late transcript copy and then its hook twin logs one row', () => {
+      const finish = (ts: number) =>
+        store.apply(ev({ kind: 'agent_finish', id: 's:agent:a1:finish', agentId: 'a1', ts }));
+      store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
+      store.apply(ev({ kind: 'tool_start', agentId: 'a1', ts: 3000, tool: tool('Read', 'read') }));
+      finish(2000); // line time, older than the hook's receive time above
+      finish(4000);
+      const s = store.snapshot();
+      expect(sub(s, 'a1')?.status).toBe('done');
+      expect(s.log.filter((l) => l.kind === 'agent_finish')).toHaveLength(1);
+    });
+
+    it('a second id for a finish that already landed logs no row', () => {
+      store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
+      store.apply(ev({ kind: 'agent_finish', id: 's:agent:a1:finish', agentId: 'a1', ts: 2000 }));
+      store.apply(ev({ kind: 'agent_finish', id: 's:agent:a1:finish:1', agentId: 'a1', ts: 2001 }));
+      expect(store.snapshot().log.filter((l) => l.kind === 'agent_finish')).toHaveLength(1);
+    });
+
+    it('a finish repeat changes nothing while done, or when older than the status', () => {
+      const finish = (ts: number) =>
+        store.apply(ev({ kind: 'agent_finish', id: 's:agent:a1:finish', agentId: 'a1', ts }));
+      store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
+      finish(2000);
+      expect(finish(2500)).toBe(false);
+      store.apply(ev({ kind: 'tool_start', agentId: 'a1', ts: 3000, tool: tool('Read', 'read') }));
+      expect(finish(2900)).toBe(false);
+      expect(sub(store.snapshot(), 'a1')?.status).toBe('working');
+    });
+
+    it('a hook finish lands when its transcript twin lost to the ts guard', () => {
+      const handback = tool('SubagentHandback', 'other', { useId: 'u-hb' });
+      const id = 's:agent:a1:finish';
+      store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
+      store.apply(ev({ kind: 'tool_start', agentId: 'a1', ts: 2030, tool: handback }));
+      store.apply(ev({ kind: 'agent_finish', id, agentId: 'a1', ts: 2000, source: 'transcript' }));
+      expect(sub(store.snapshot(), 'a1')?.status).toBe('working');
+      store.apply(ev({ kind: 'agent_finish', id, agentId: 'a1', ts: 2040, source: 'hook' }));
+      expect(sub(store.snapshot(), 'a1')?.status).toBe('done');
+    });
+
+    it("a tool's own end lands even with an older timestamp than its start", () => {
+      const read = tool('Read', 'read', { useId: 'u1' });
+      store.apply(ev({ kind: 'tool_start', ts: 2030, tool: read, source: 'hook' }));
+      store.apply(ev({ kind: 'tool_end', ts: 2010, tool: read, source: 'transcript' }));
+      expect(orch(store.snapshot())).toMatchObject({ status: 'thinking' });
+      expect(orch(store.snapshot())?.currentTool).toBeUndefined();
+      // The clock doesn't move back, so newer truth still wins and older still loses.
+      store.apply(ev({ kind: 'idle', ts: 2020 }));
+      expect(orch(store.snapshot())?.status).toBe('thinking');
+    });
+
+    it("a parallel tool's end keeps a permission wait with no use id", () => {
+      const a = tool('Bash', 'execute', { useId: 'u-a', summary: 'npm test' });
+      const b = tool('Bash', 'execute', { summary: 'rm -rf build' });
+      store.apply(ev({ kind: 'tool_start', ts: 2000, tool: a }));
+      store.apply(ev({ kind: 'waiting_for_user', ts: 3000, tool: b }));
+      store.apply(ev({ kind: 'tool_end', ts: 3100, tool: a }));
+      expect(orch(store.snapshot())?.status).toBe('waiting');
+      store.apply(ev({ kind: 'tool_end', ts: 3200, tool: { ...b, useId: 'u-b' } }));
+      expect(orch(store.snapshot())?.status).toBe('thinking');
+    });
+
+    it("a parallel tool's end keeps a wait that took its call's use id", () => {
+      const a = tool('Read', 'read', { useId: 'u-a', summary: 'a.ts' });
+      const b = tool('Bash', 'execute', { useId: 'u-b', summary: 'make' });
+      const request = tool('Bash', 'execute', { summary: 'make' });
+      store.apply(ev({ kind: 'tool_start', ts: 2000, tool: a }));
+      store.apply(ev({ kind: 'tool_start', ts: 2001, tool: b }));
+      store.apply(ev({ kind: 'waiting_for_user', ts: 3000, tool: request }));
+      expect(orch(store.snapshot())?.currentTool?.useId).toBe('u-b');
+      store.apply(ev({ kind: 'tool_end', ts: 3100, tool: a }));
+      expect(orch(store.snapshot())?.status).toBe('waiting');
+      store.apply(ev({ kind: 'tool_end', ts: 3200, tool: b }));
+      expect(orch(store.snapshot())?.status).toBe('thinking');
+    });
+
+    it('a tool end still clears a wait that names no tool', () => {
+      store.apply(ev({ kind: 'waiting_for_user', ts: 2000 }));
+      store.apply(ev({ kind: 'tool_end', ts: 3000, tool: tool('Bash', 'execute') }));
+      expect(orch(store.snapshot())?.status).toBe('thinking');
+    });
+
+    it('a late PreToolUse for the hand-back does not revive a finished subagent', () => {
+      const handback = {
+        ...tool('SubagentHandback', 'other', { useId: 'u-hb' }),
+        finalizing: true,
+      };
+      store.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 1000 }));
+      store.apply(ev({ kind: 'agent_finish', agentId: 'a1', ts: 2000 }));
+      store.apply(ev({ kind: 'tool_start', agentId: 'a1', ts: 2010, tool: handback }));
+      store.apply(ev({ kind: 'tool_end', agentId: 'a1', ts: 2020, tool: handback }));
+      expect(sub(store.snapshot(), 'a1')).toMatchObject({ status: 'done', finishedAt: 2000 });
+    });
+
+    it('a tool_start racing its own permission request keeps the wait', () => {
+      const request = tool('Bash', 'execute', { summary: 'make' });
+      const start = { ...request, useId: 'u1' };
+      store.apply(ev({ kind: 'waiting_for_user', ts: 2000, tool: request }));
+      store.apply(ev({ kind: 'tool_start', ts: 2020, tool: start }));
+      expect(orch(store.snapshot())).toMatchObject({
+        status: 'waiting',
+        currentTool: { useId: 'u1' },
+      });
+    });
+
+    it('a tool_start outside the race window, or for another tool, ends the wait', () => {
+      const bash = tool('Bash', 'execute', { summary: 'make' });
+      store.apply(ev({ kind: 'waiting_for_user', ts: 2000, tool: bash }));
+      store.apply(ev({ kind: 'tool_start', ts: 2301, tool: { ...bash, useId: 'u1' } }));
+      expect(orch(store.snapshot())?.status).toBe('working');
+      store.apply(ev({ kind: 'waiting_for_user', ts: 3000, tool: bash }));
+      store.apply(ev({ kind: 'tool_start', ts: 3020, tool: tool('Read', 'read') }));
+      expect(orch(store.snapshot())?.status).toBe('working');
+    });
+
     it('log stays chronological', () => {
       store.apply(ev({ kind: 'idle', ts: 3000 }));
       store.apply(ev({ kind: 'user_prompt', ts: 1000 }));
@@ -444,7 +574,86 @@ describe('StationStore', () => {
     });
   });
 
+  describe('sessions that ended', () => {
+    const removedEnded = (): StationStore => {
+      const st = new StationStore({ sessionLingerMs: 1000 });
+      st.apply(ev({ kind: 'session_start', ts: 1000 }));
+      st.apply(ev({ kind: 'session_end', ts: 2000 }));
+      st.tick(3500);
+      return st;
+    };
+
+    it('a late subagent hook does not bring back a removed ended session', () => {
+      const st = removedEnded();
+      const late = ev({ kind: 'tool_end', agentId: 'a1', ts: 5000, tool: tool('Read', 'read') });
+      expect(st.apply(late)).toBe(false);
+      expect(st.apply(ev({ kind: 'idle', ts: 5000 }))).toBe(false);
+      expect(st.snapshot().sessions['sess-1']).toBeUndefined();
+    });
+
+    it('a resumed session comes back on a prompt, and later events then apply', () => {
+      const st = removedEnded();
+      expect(st.apply(ev({ kind: 'user_prompt', ts: 5000 }))).toBe(true);
+      expect(st.apply(ev({ kind: 'idle', ts: 6000 }))).toBe(true);
+      expect(orch(st.snapshot())?.status).toBe('idle');
+    });
+
+    it('a subagent spawn brings a removed ended session back', () => {
+      const st = removedEnded();
+      expect(st.apply(ev({ kind: 'agent_spawn', agentId: 'a1', ts: 5000 }))).toBe(true);
+    });
+
+    it('a session that never ended comes back on any newer event', () => {
+      store.apply(ev({ kind: 'session_start', projectId: 'p1', ts: 1000 }));
+      store.removeProject('p1', 2000);
+      expect(store.apply(ev({ kind: 'idle', projectId: 'p1', ts: 3000 }))).toBe(true);
+    });
+
+    it('session_end of an unknown session creates no zone', () => {
+      expect(store.apply(ev({ kind: 'session_end', ts: 5000 }))).toBe(false);
+      const s = store.snapshot();
+      expect(s.projects).toEqual({});
+      expect(s.sessions).toEqual({});
+      // Backfill of that closed session stays out; a new run of it does not.
+      expect(store.apply(ev({ kind: 'user_prompt', ts: 4000 }))).toBe(false);
+      expect(store.apply(ev({ kind: 'tool_start', ts: 6000, tool: tool('Read', 'read') }))).toBe(
+        false,
+      );
+      expect(store.apply(ev({ kind: 'session_start', ts: 6000 }))).toBe(true);
+    });
+
+    it('session_end after removing a project does not bring the zone back', () => {
+      store.apply(ev({ kind: 'session_start', projectId: 'p1', ts: 1000 }));
+      store.removeProject('p1', 2000);
+      expect(store.apply(ev({ kind: 'session_end', projectId: 'p1', ts: 3000 }))).toBe(false);
+      expect(store.snapshot().projects['p1']).toBeUndefined();
+      expect(store.apply(ev({ kind: 'tool_end', projectId: 'p1', ts: 4000 }))).toBe(false);
+    });
+  });
+
   describe('log', () => {
+    it('clearIdleProjects drops the log rows of what it removed', () => {
+      store.apply(ev({ kind: 'session_start', sessionId: 's1', projectId: 'p1', ts: 1000 }));
+      store.apply(ev({ kind: 'session_start', sessionId: 's2', projectId: 'p2', ts: 50_000 }));
+      store.clearIdleProjects(60_000, 30_000);
+      expect(store.snapshot().log.map((l) => l.projectId)).toEqual(['p2']);
+    });
+
+    it('collapses the hook and transcript twins of idle and compacting', () => {
+      const logged = (kind: 'idle' | 'compacting') =>
+        store.snapshot().log.filter((l) => l.kind === kind);
+      for (const kind of ['idle', 'compacting'] as const) {
+        store.apply(ev({ kind, ts: 5000, source: 'hook' }));
+        store.apply(ev({ kind, ts: 4990, source: 'transcript' }));
+        expect(logged(kind)).toHaveLength(1);
+      }
+      store.apply(ev({ kind: 'idle', ts: 4995, source: 'transcript' }));
+      store.apply(ev({ kind: 'idle', ts: 16_000, source: 'transcript' }));
+      expect(logged('idle')).toHaveLength(2);
+      store.apply(ev({ kind: 'idle', ts: 16_001, agentId: 'a1', source: 'hook' }));
+      expect(logged('idle')).toHaveLength(3);
+    });
+
     it('is capped, dropping the oldest', () => {
       const st = new StationStore({ logCap: 3 });
       for (let i = 0; i < 5; i++) st.apply(ev({ kind: 'idle', ts: 1000 + i }));

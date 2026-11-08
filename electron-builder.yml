@@ -11,8 +11,8 @@ files:
   - out/**
   - resources/**
   - package.json
-  # Vite bundles every dependency into out/; main/preload import only node:* and electron.
-  # If you add a runtime dependency to main, bundle it or remove this line.
+  # Main and preload may import only node:* and electron (tests/bundle.test.ts). A runtime
+  # dependency of main must be listed in build.externalizeDeps.exclude in electron.vite.config.ts.
   - '!node_modules/**'
 # Ship the Claude Code plugin inside the app so the manual hook install can point at it.
 extraResources:

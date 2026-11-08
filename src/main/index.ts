@@ -1,4 +1,12 @@
-import { app, BrowserWindow, clipboard, ipcMain, Notification, session } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  ipcMain,
+  Notification,
+  session,
+  type WebContents,
+} from 'electron';
 import {
   IPC,
   type AppInfo,
@@ -9,13 +17,15 @@ import {
 import type { Settings } from '@shared/settings';
 import type { StationSnapshot } from '@shared/types';
 import { readAppFlags, writeAppFlags } from './appState';
-import { buildLaunchInfo, parseHookArgs, writeLaunchInfo } from './launchInfo';
+import { holdUntilDismissed, waitingAlerts } from './attention';
+import { buildLaunchInfo, modeFromArgs, parseHookArgs, writeLaunchInfo } from './launchInfo';
 import { installNetGuard } from './netGuard';
 import type { StationCommand } from './server';
+import { CommandGate, decideTheme } from './rendererLink';
 import { SettingsStore } from './settings';
 import { Station, type StationTuning } from './station';
 import { StationTray, trayStatusFor } from './tray';
-import { registerUserThemeIpc } from './userThemes';
+import { listUserThemes, registerUserThemeIpc } from './userThemes';
 import { WindowManager } from './windows';
 
 // Tests (and power users) can isolate all app state: must run before anything reads userData.
@@ -28,13 +38,19 @@ const THEME_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 let station: Station | null = null;
 let windows: WindowManager | null = null;
 let tray: StationTray | null = null; // module scope: keeps the tray from being garbage-collected
-let pendingCommands: RendererCommand[] = [];
+const commands = new CommandGate<WebContents, RendererCommand>((target, cmd) =>
+  target.send(IPC.command, cmd),
+);
 /** Windows whose 'closed' handler is wired (onReady runs again on every reload). */
 const closeWired = new WeakSet<BrowserWindow>();
 /** Hook payloads from `--hook-payload=` that arrived before the station started. */
 let pendingHookPayloads: unknown[] = [];
 let stationStarted = false;
 let knownThemes: { id: string; name: string }[] = [{ id: 'spaceship', name: 'Spaceship' }];
+/** True once the renderer reported the themes it can load (built-ins are only known to it). */
+let themesReported = false;
+/** A theme asked for before `themesReported` (`--theme=` at startup). */
+let deferredTheme: string | null = null;
 const flags = readAppFlags();
 const settings = new SettingsStore(app.getPath('userData'));
 
@@ -69,17 +85,48 @@ function applyArgs(argv: readonly string[], startup: boolean): void {
 }
 
 function sendToRenderer(cmd: RendererCommand): void {
-  const win = windows?.window;
-  if (win && windows?.ready) win.webContents.send(IPC.command, cmd);
-  else pendingCommands.push(cmd);
+  commands.send(windows?.window?.webContents ?? null, cmd);
+}
+
+function themeDecision(id: string): ReturnType<typeof decideTheme> {
+  const ids = knownThemes.map((t) => t.id);
+  return decideTheme(id, ids, themesReported, THEME_ID);
 }
 
 function setTheme(id: string): void {
-  if (!THEME_ID.test(id)) return;
-  // Unknown ids still go to the renderer (it falls back to Spaceship with a visible warning),
-  // but only themes the renderer reported as loadable are persisted.
-  if (knownThemes.some((t) => t.id === id)) settings.update({ theme: id });
-  else sendToRenderer({ action: 'theme', arg: id });
+  switch (themeDecision(id)) {
+    case 'known':
+      settings.update({ theme: id });
+      break;
+    case 'defer':
+      deferredTheme = id;
+      break;
+    case 'unknown':
+      sendToRenderer({ action: 'theme-unknown', arg: id });
+      break;
+    case 'invalid':
+      break;
+  }
+}
+
+/** Themes copied in while the app runs count too; the renderer may not have reported them yet. */
+async function addNewUserThemes(): Promise<void> {
+  const fresh = (await listUserThemes()).filter((t) => !knownThemes.some((k) => k.id === t.id));
+  if (fresh.length === 0) return;
+  knownThemes = [...knownThemes, ...fresh.map(({ id, name }) => ({ id, name }))];
+  tray?.rebuildMenu();
+}
+
+/** `/station theme <id>`. The launcher shows `error`, so nothing claims a switch that didn't happen. */
+async function themeCommand(id: string): Promise<{ ok: false; error: string } | undefined> {
+  await addNewUserThemes();
+  const decision = themeDecision(id);
+  if (decision === 'unknown' || decision === 'invalid') {
+    return { ok: false, error: `Unknown theme "${id}".` };
+  }
+  setTheme(id);
+  windows?.focus();
+  return undefined;
 }
 
 function status(): StationStatus {
@@ -88,6 +135,7 @@ function status(): StationStatus {
     eventsReceived: station?.eventsReceived ?? 0,
     hasReceivedEvents: flags.hasReceivedEvents,
     demo: station !== null && station.mode !== 'live',
+    ...(settings.warning ? { settingsWarning: settings.warning } : {}),
   };
 }
 
@@ -110,7 +158,7 @@ function handleCommand(cmd: StationCommand): unknown {
       windows?.focus();
       return undefined;
     case 'theme':
-      if (cmd.arg) setTheme(cmd.arg);
+      if (cmd.arg) return themeCommand(cmd.arg);
       windows?.focus();
       return undefined;
     case 'status':
@@ -120,25 +168,19 @@ function handleCommand(cmd: StationCommand): unknown {
 
 // ── attention: tray dot + optional native notifications ──────────────────────
 const notified = new Set<string>();
+const shownNotifications = new Set<Notification>();
 
 function checkAttention(snap: StationSnapshot): void {
   tray?.setStatus(trayStatusFor(snap));
-  const waiting = new Set<string>();
-  for (const [key, a] of Object.entries(snap.agents)) {
-    if (a.status !== 'waiting') continue;
-    waiting.add(key);
-    if (notified.has(key)) continue;
-    notified.add(key);
-    if (!settings.get().notifications || !Notification.isSupported()) continue;
-    const project = snap.projects[a.projectId]?.name ?? 'a project';
-    const who = a.isOrchestrator ? 'The orchestrator' : a.label;
-    // Only the agent label and project name — never tool input.
-    const n = new Notification({ title: 'WSC', body: `${who} in ${project} needs your input` });
+  // The demo's agents aren't real: they never raise an OS notification.
+  const enabled =
+    station?.mode === 'live' && settings.get().notifications && Notification.isSupported();
+  for (const body of waitingAlerts(snap, notified, enabled)) {
+    const n = new Notification({ title: 'WSC', body });
+    holdUntilDismissed(shownNotifications, n);
     n.on('click', () => windows?.focus());
     n.show();
   }
-  // Re-arm once an agent stops waiting, so a later wait notifies again.
-  for (const key of [...notified]) if (!waiting.has(key)) notified.delete(key);
 }
 
 function applySettings(next: Settings, prev?: Settings): void {
@@ -215,10 +257,21 @@ function registerIpc(): void {
       if (typeof id !== 'string' || !THEME_ID.test(id) || typeof name !== 'string') continue;
       clean.push({ id, name: name.slice(0, 60) });
     }
-    if (clean.length > 0) knownThemes = clean;
+    if (clean.length > 0) {
+      knownThemes = clean;
+      themesReported = true;
+    }
     tray?.rebuildMenu();
+    if (themesReported && deferredTheme !== null) {
+      const id = deferredTheme;
+      deferredTheme = null;
+      setTheme(id);
+    }
   });
-  registerUserThemeIpc(ipcMain, () => windows?.window ?? null, !app.isPackaged);
+  ipcMain.on(IPC.rendererReady, (e) => {
+    if (e.sender === windows?.window?.webContents) commands.markReady(e.sender);
+  });
+  registerUserThemeIpc(ipcMain, () => windows?.window ?? null);
 }
 
 function createTray(): void {
@@ -259,7 +312,7 @@ if (!app.requestSingleInstanceLock()) {
       else if (windows && !windows.window) windows.create({ inactive: true });
       return;
     }
-    if (argv.includes('--demo')) station?.startDemo();
+    if (modeFromArgs(argv) !== 'live') station?.startDemo();
     applyArgs(argv, false);
     windows?.focus();
   });
@@ -275,7 +328,7 @@ if (!app.requestSingleInstanceLock()) {
     station = new Station({
       version: app.getVersion(),
       port: initial.port,
-      mode: process.argv.includes('--demo') ? 'demo-pinned' : 'live',
+      mode: modeFromArgs(process.argv),
       tuning: tuningFrom(initial),
       onSnapshot: (snap) => windows?.window?.webContents.send(IPC.snapshot, snap),
       onStatusChange: pushStatus,
@@ -313,11 +366,15 @@ if (!app.requestSingleInstanceLock()) {
             appPath: app.getAppPath(),
             isPackaged: app.isPackaged,
             platform: process.platform,
+            ...(process.env['APPIMAGE'] ? { appImage: process.env['APPIMAGE'] } : {}),
           }),
         );
       });
 
-    settings.onChange((next, prev) => applySettings(next, prev));
+    settings.onChange((next, prev) => {
+      applySettings(next, prev);
+      pushStatus(); // settings.warning may have changed with the file
+    });
     applySettings(initial);
     registerIpc();
 
@@ -330,10 +387,8 @@ if (!app.requestSingleInstanceLock()) {
           win.on('closed', () => {
             if (!windows?.window) station?.setViewHidden(true);
           });
+          win.webContents.on('did-start-loading', () => commands.markLoading(win.webContents));
         }
-        const queued = pendingCommands;
-        pendingCommands = [];
-        for (const cmd of queued) win.webContents.send(IPC.command, cmd);
         pushStatus();
       },
       onModeChange: () => tray?.rebuildMenu(),

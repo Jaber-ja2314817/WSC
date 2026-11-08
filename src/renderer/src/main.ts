@@ -2,8 +2,8 @@
 import 'pixi.js/unsafe-eval';
 import { Application, TextureStyle, Ticker } from 'pixi.js';
 import { makePathfinder } from '@shared/astar';
-import type { CameraState, WindowMode } from '@shared/ipc';
-import { computeLayout, layoutInputFor } from '@shared/layout';
+import type { CameraState, StationStatus, WindowMode } from '@shared/ipc';
+import { computeLayout, layoutInputFor, SlotBook } from '@shared/layout';
 import type { Rect, StationLayout, TilePos } from '@shared/layoutTypes';
 import type { Settings } from '@shared/settings';
 import { ORCHESTRATOR_ID, type StationSnapshot } from '@shared/types';
@@ -15,6 +15,7 @@ import { sessionIdFromAgentKey } from '../panels/dashboardModel';
 import { StationScene } from '../scene/StationScene';
 import { frameHasMotion, stillFps, targetFps } from '../scene/pacing';
 import { formatElapsed } from '../scene/format';
+import { DEFAULT_THEME_ID } from '../themes/loader';
 import { ThemeManager } from '../themes/manager';
 import type { ThemeRuntime } from '../themes/types';
 
@@ -126,6 +127,7 @@ async function boot(): Promise<void> {
   let selected: string | undefined;
   let layout: StationLayout | null = null;
   let layoutKey = '';
+  const slots = new SlotBook();
   let pathfinder: (a: TilePos, b: TilePos) => TilePos[] | null = () => null;
   let theme: ThemeRuntime | null = null;
   let lastFrame: DirectorFrame | null = null;
@@ -218,19 +220,22 @@ async function boot(): Promise<void> {
     panels.setThemes(list);
     window.wsc.reportThemes(list.map(({ id, name }) => ({ id, name })));
   };
-  await applyTheme(settings.theme);
+  // A theme that throws must not stop boot: that would leave no snapshots and no frame loop.
+  await applyTheme(settings.theme).catch(() => applyTheme(DEFAULT_THEME_ID));
   void refreshThemeList();
   window.wsc.onThemesChanged(() => {
     themes.invalidate();
     void refreshThemeList();
-    // Dev hot-reload: re-apply the current theme if it's a user theme being edited.
-    if (themes.currentId && themes.currentId === settings.theme) void applyTheme(settings.theme);
+    // Re-apply the current theme if it's a user theme being edited.
+    if (themes.currentId === settings.theme && themes.isUserTheme(settings.theme)) {
+      void applyTheme(settings.theme);
+    }
   });
 
   // ── state ─────────────────────────────────────────────────────────────────
   const onSnapshot = (snap: StationSnapshot): void => {
     snapshot = snap;
-    const input = layoutInputFor(snap, settings.loungeSize);
+    const input = slots.assign(layoutInputFor(snap, settings.loungeSize));
     const key = JSON.stringify(input);
     if (key !== layoutKey || !layout) {
       layoutKey = key;
@@ -261,10 +266,20 @@ async function boot(): Promise<void> {
   });
 
   window.wsc.onCommand((cmd) => {
-    // Unknown theme ids land here (main only persists known ones): show the fallback warning.
-    if (cmd.action === 'theme' && cmd.arg) void applyTheme(cmd.arg);
-    else if (cmd.action === 'compact') void window.wsc.setWindowMode('compact');
+    if (cmd.action === 'theme-unknown' && cmd.arg) {
+      showBanner(`Theme "${cmd.arg}" was not found. Keeping the current theme.`);
+    } else if (cmd.action === 'compact') void window.wsc.setWindowMode('compact');
   });
+  window.wsc.rendererReady();
+
+  let settingsWarning: string | undefined;
+  const warnSettings = (s: StationStatus): void => {
+    if (s.settingsWarning === settingsWarning) return;
+    settingsWarning = s.settingsWarning;
+    if (settingsWarning) showBanner(settingsWarning);
+  };
+  void window.wsc.getStatus().then(warnSettings);
+  window.wsc.onStatus(warnSettings);
 
   // ── input ─────────────────────────────────────────────────────────────────
   document.getElementById('fit-all')?.addEventListener('click', () => scene.fitAll());

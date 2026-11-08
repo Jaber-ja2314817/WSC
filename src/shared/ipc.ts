@@ -31,6 +31,7 @@ export const IPC = {
   getDashboard: 'wsc:get-dashboard',
   getTimeline: 'wsc:get-timeline',
   visibility: 'wsc:visibility',
+  rendererReady: 'wsc:renderer-ready',
 } as const;
 
 export type WindowMode = 'normal' | 'compact';
@@ -55,6 +56,8 @@ export interface StationStatus {
   /** True once any real hook event has ever reached this install (persisted flag). */
   hasReceivedEvents: boolean;
   demo: boolean;
+  /** Something is wrong with settings.json; shown to the user as a banner. */
+  settingsWarning?: string;
 }
 
 export interface ConnectionTest {
@@ -65,7 +68,8 @@ export interface ConnectionTest {
 
 /**
  * Commands pushed from main to the renderer (from `/station`, the tray or startup args).
- * Actions: 'theme' (arg = theme id), 'compact'. Unknown actions must be ignored.
+ * Actions: 'theme-unknown' (arg = the theme id nobody knows), 'compact'. Unknown actions must be
+ * ignored. Main holds them until the renderer calls `rendererReady()`.
  */
 export interface RendererCommand {
   action: string;
@@ -98,7 +102,7 @@ export interface WscApi {
   /** Themes in <appData>/WSC/themes. */
   listUserThemes(): Promise<UserThemeInfo[]>;
   getUserTheme(id: string): Promise<UserThemeData | null>;
-  /** Dev only: the user themes folder changed on disk. */
+  /** The user themes folder changed on disk. */
   onThemesChanged(cb: () => void): () => void;
   getSettings(): Promise<Settings>;
   /** Partial update; invalid fields are ignored. Resolves to the saved settings. */
@@ -121,4 +125,11 @@ export interface WscApi {
   getTimeline(sessionId: string): Promise<TimelineStep[]>;
   /** Renderer → main: the window became visible/hidden. Hidden: main pushes nothing. */
   setVisible(visible: boolean): void;
+  /** Renderer → main: `onCommand` is listening, send what was held back. */
+  rendererReady(): void;
+}
+
+/** Electron's login items exist on macOS and Windows only. Takes `navigator.userAgent`. */
+export function supportsLoginItem(userAgent: string): boolean {
+  return !/\bLinux\b/.test(userAgent);
 }

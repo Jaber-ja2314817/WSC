@@ -7,7 +7,7 @@
 // opt-in, redacted prompt preview. Verified against Claude Code 2.1.308 (keys only).
 import { rawTokenTotal, type TokenUsage, type TranscriptExtras } from '../dashboardTypes';
 import { projectIdFor, projectNameFor } from '../projects';
-import { redactSecrets, summarizeTool } from '../redact';
+import { redactSecrets, safeLabel, summarizeTool } from '../redact';
 import { categorizeTool } from '../toolCategories';
 import { ORCHESTRATOR_ID, type StationEvent, type ToolCategory } from '../types';
 
@@ -35,6 +35,15 @@ export interface TranscriptLineResult {
 }
 
 const DELEGATE_TOOLS = new Set(['Task', 'Agent']);
+/** The call a subagent closes with. */
+export const HANDBACK_TOOL = 'SubagentHandback';
+/** A workflow agent's last call: these agents return a structured result instead of handing back. */
+export const WORKFLOW_RESULT_TOOL = 'StructuredOutput';
+
+/** A subagent's final call. A late copy of one must not read as new work after it finished. */
+export function isFinalTool(name: string | undefined): boolean {
+  return name === HANDBACK_TOOL || name === WORKFLOW_RESULT_TOOL;
+}
 /** Line types that belong to the conversation; everything else is bookkeeping and ignored. */
 const MESSAGE_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
 /** Claude Code's model id for locally generated messages (errors, interrupts): no API usage. */
@@ -46,6 +55,8 @@ export const UNKNOWN_PROJECT_NAME = 'unknown';
 /** User lines that look typed but are command plumbing, not prompts that start a turn. */
 const NOT_A_PROMPT =
   /^\s*(?:<(?:command-name|command-message|command-args|local-command-[a-z]+|bash-input|bash-stdout|bash-stderr)>|\[Request interrupted)/;
+/** Written when the user presses Esc. No Stop fires for that, so this is the turn's end. */
+const INTERRUPTED = /^\s*\[Request interrupted/;
 
 type Rec = Record<string, unknown>;
 
@@ -177,27 +188,27 @@ function addAssistantFacts(extras: TranscriptExtras, rec: Rec, message: Rec, hea
   if (head.rank !== undefined && Number.isFinite(head.rank)) extras.usage.rank = head.rank;
 }
 
+/** A user line's content when it is text only; undefined for tool results and the like. */
+function plainText(message: Rec): string | undefined {
+  const content = message['content'];
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!isRec(item) || item['type'] !== 'text' || typeof item['text'] !== 'string') {
+      return undefined;
+    }
+    parts.push(item['text']);
+  }
+  return parts.join('\n');
+}
+
 /** The text of a prompt the user typed, or undefined for meta, system and tool-result lines. */
 function typedPromptText(rec: Rec, message: Rec): string | undefined {
   if (rec['isMeta'] === true || rec['isCompactSummary'] === true) return undefined;
   if (rec['promptSource'] === 'system') return undefined;
-  const content = message['content'];
-  let text: string;
-  if (typeof content === 'string') {
-    text = content;
-  } else if (Array.isArray(content) && content.length > 0) {
-    const parts: string[] = [];
-    for (const item of content) {
-      if (!isRec(item) || item['type'] !== 'text' || typeof item['text'] !== 'string') {
-        return undefined;
-      }
-      parts.push(item['text']);
-    }
-    text = parts.join('\n');
-  } else {
-    return undefined;
-  }
-  if (!text.trim() || NOT_A_PROMPT.test(text)) return undefined;
+  const text = plainText(message);
+  if (text === undefined || !text.trim() || NOT_A_PROMPT.test(text)) return undefined;
   return text;
 }
 
@@ -265,6 +276,12 @@ function parseLine(line: string, ctx: TranscriptContext): TranscriptLineResult {
         if (preview) extras.promptPreview = preview;
       }
     }
+    if (agentId === ORCHESTRATOR_ID && rec['isSidechain'] !== true) {
+      if (INTERRUPTED.test(plainText(message) ?? '')) {
+        const uuid = str(rec['uuid']) ?? String(ts);
+        out.push({ ...base, id: `${sessionId}:idle:${uuid}`, kind: 'idle' });
+      }
+    }
   }
 
   if (!Array.isArray(message['content'])) return { events: out, extras };
@@ -291,19 +308,21 @@ function parseLine(line: string, ctx: TranscriptContext): TranscriptLineResult {
           category,
           summary: summarizeTool(name, input, { full: ctx.fullToolDetails === true }),
           useId,
+          ...(isFinalTool(name) ? { finalizing: true } : {}),
         },
       };
       if (isDelegate && isRec(input)) {
-        const label = str(input['subagent_type']) ?? str(input['description']);
+        const label = safeLabel(str(input['subagent_type']) ?? str(input['description']) ?? '');
         if (label) ev.label = label;
       }
       out.push(ev);
     }
     // The lead finished its turn and is waiting for the next prompt. Transcripts never record
     // a session end, so this is what keeps a backfilled, already-closed session from "thinking".
+    // One message can span several end_turn lines: it is one turn end, so key on the message.
     if (agentId === ORCHESTRATOR_ID && message['stop_reason'] === 'end_turn') {
-      const uuid = str(rec['uuid']) ?? String(ts);
-      out.push({ ...base, id: `${sessionId}:idle:${uuid}`, kind: 'idle' });
+      const key = str(message['id']) ?? str(rec['uuid']) ?? String(ts);
+      out.push({ ...base, id: `${sessionId}:idle:${key}`, kind: 'idle' });
     }
   } else if (type === 'user') {
     for (const item of content) {
@@ -335,7 +354,7 @@ export function normalizeSubagentMeta(
   try {
     const agentId = stripAgentPrefix(ctx.agentId);
     const m = isRec(meta) ? meta : {};
-    const label = str(m['agentType']) ?? str(m['description']);
+    const label = safeLabel(str(m['agentType']) ?? str(m['description']) ?? '');
     const ev: StationEvent = {
       id: `${ctx.sessionId}:agent:${agentId}:spawn`,
       ts: ctx.ts,

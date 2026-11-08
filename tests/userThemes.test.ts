@@ -1,8 +1,14 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getUserTheme, listUserThemes, readThemeAsset } from '../src/main/userThemes';
+import type { BrowserWindow, IpcMain } from 'electron';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  getUserTheme,
+  listUserThemes,
+  readThemeAsset,
+  registerUserThemeIpc,
+} from '../src/main/userThemes';
 import { validateTheme } from '../src/shared/themeSchema';
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
@@ -136,6 +142,25 @@ describe('docs/examples/minimal-theme', () => {
     if (res.ok) {
       expect(res.manifest.id).toBe('minimal-theme');
       expect(res.manifest.art).toEqual({ kind: 'generated', generator: 'spaceship' });
+    }
+  });
+});
+
+describe('registerUserThemeIpc', () => {
+  it('reports a theme copied into a themes folder that did not exist at startup', async () => {
+    const folder = join(root, 'not-created-yet');
+    process.env['WSC_THEMES_DIR'] = folder;
+    const send = vi.fn();
+    const ipc = { handle: vi.fn(), removeHandler: vi.fn() } as unknown as IpcMain;
+    const win = { webContents: { send } } as unknown as BrowserWindow;
+    const stop = registerUserThemeIpc(ipc, () => win);
+    try {
+      await mkdir(join(folder, 'neon'), { recursive: true });
+      await writeFile(join(folder, 'neon', 'theme.json'), '{}');
+      await vi.waitFor(() => expect(send).toHaveBeenCalled(), { timeout: 3000 });
+    } finally {
+      stop();
+      delete process.env['WSC_THEMES_DIR'];
     }
   });
 });

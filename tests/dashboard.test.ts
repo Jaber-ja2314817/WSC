@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { SessionLedger, describeStep } from '../src/shared/dashboard';
+import { SessionLedger, WAITING_CAP_MS, describeStep } from '../src/shared/dashboard';
 import type { DashboardOptions, TranscriptExtras, UsageRecord } from '../src/shared/dashboardTypes';
 import { normalizeHookPayload } from '../src/shared/normalizer/hook';
 import { normalizeTranscriptLineFull } from '../src/shared/normalizer/transcript';
@@ -289,6 +289,30 @@ describe('SessionLedger — timeline', () => {
   });
 });
 
+describe('SessionLedger — timeline under many subagents', () => {
+  const subTool = (i: number): StationEvent =>
+    toolStart('Read', 'read', 'a.ts', `u${i}`, { ts: 2_000 + i, agentId: `a${i % 7}` });
+
+  it("subagents don't flood the lead's steps out of the timeline", () => {
+    const l = new SessionLedger({ timelineCap: 10 });
+    l.applyEvents([ev({ kind: 'user_prompt', ts: 1_000 })]);
+    l.applyEvents(Array.from({ length: 50 }, (_, i) => subTool(i)));
+    const steps = l.timeline('sess-1');
+    expect(steps).toHaveLength(10);
+    expect(steps.at(-1)?.kind).toBe('prompt');
+    expect(steps[0]?.ts).toBe(2_049);
+  });
+
+  it("the lead's steps give way once they hold half the cap", () => {
+    const l = new SessionLedger({ timelineCap: 4 });
+    l.applyEvents([1, 2, 3].map((n) => ev({ kind: 'user_prompt', ts: 1_000 + n * 20_000 })));
+    l.applyEvents([subTool(100000), subTool(100001)]);
+    const steps = l.timeline('sess-1');
+    expect(steps).toHaveLength(4);
+    expect(steps.filter((s) => s.agentId === ORCHESTRATOR_ID)).toHaveLength(2);
+  });
+});
+
 describe('SessionLedger — status', () => {
   const T = 1_000_000;
   const statusOf = (l: SessionLedger, now: number, station = EMPTY): string | undefined =>
@@ -342,6 +366,61 @@ describe('SessionLedger — status', () => {
     expect(s?.subagents).toEqual([
       { id: 'sub1', label: 'Explore', status: 'waiting', toolCalls: 0 },
     ]);
+  });
+
+  it('store: a waiting agent stops counting once the session has been silent for a day', () => {
+    const l = new SessionLedger();
+    const store = new StationStore();
+    const evs = [ev({ kind: 'waiting_for_user', ts: T })];
+    l.applyEvents(evs);
+    store.applyMany(evs);
+    const at = (now: number) =>
+      l.snapshot(store.snapshot(), opts(now, { sessionHorizonMs: 7 * WAITING_CAP_MS })).sessions[0];
+    expect(at(T + WAITING_CAP_MS - 1)?.status).toBe('waiting');
+    expect(at(T + WAITING_CAP_MS)).toMatchObject({ status: 'idle', currentStep: 'Idle' });
+    expect(at(T + 3 * WAITING_CAP_MS)?.status).toBe('idle');
+  });
+
+  it('a compaction finishing mid-turn is not a turn end', () => {
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'user_prompt', ts: T }),
+      ev({ kind: 'compacting', ts: T + 1 }),
+      ev({ kind: 'idle', ts: T + 2, idleReason: 'compact' }),
+    ]);
+    expect(statusOf(l, T + 3)).toBe('working');
+    expect(l.snapshot(EMPTY, opts(T + 3)).sessions[0]?.currentStep).not.toBe('Your turn');
+    expect(l.timeline('sess-1').some((s) => s.kind === 'turn_end')).toBe(false);
+  });
+
+  it('a compaction between turns goes back to the turn it interrupted', () => {
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'user_prompt', ts: T }),
+      ev({ kind: 'idle', ts: T + 1 }),
+      ev({ kind: 'compacting', ts: T + 2, source: 'hook' }),
+      ev({ kind: 'compacting', ts: T + 2, source: 'transcript' }),
+      ev({ kind: 'idle', ts: T + 3, idleReason: 'compact' }),
+    ]);
+    expect(l.snapshot(EMPTY, opts(T + 4)).sessions[0]).toMatchObject({
+      status: 'waiting',
+      currentStep: 'Your turn',
+    });
+    expect(l.timeline('sess-1').filter((s) => s.kind === 'turn_end')).toHaveLength(1);
+  });
+
+  it('a compaction from an earlier turn does not leak into a later one', () => {
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'user_prompt', ts: T }),
+      ev({ kind: 'idle', ts: T + 1 }),
+      ev({ kind: 'compacting', ts: T + 2 }),
+      ev({ kind: 'idle', ts: T + 3, idleReason: 'compact' }),
+      ev({ kind: 'user_prompt', ts: T + 4 }),
+      ev({ kind: 'compacting', ts: T + 5 }),
+      ev({ kind: 'idle', ts: T + 6, idleReason: 'compact' }),
+    ]);
+    expect(statusOf(l, T + 7)).toBe('working');
   });
 
   it('stale store agents count as working only while recent', () => {
@@ -439,6 +518,108 @@ describe('SessionLedger — subagent hand-back', () => {
     ]);
     expect(l.snapshot(EMPTY, opts(T + 100)).sessions[0]?.subagents[0]?.status).toBe('done');
   });
+
+  it('one finish arriving twice around a tool result is one timeline step', () => {
+    const T = 1_000_000;
+    const FINISH = 'sess-1:agent:a1:finish';
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'agent_spawn', ts: T, agentId: 'a1', label: 'one' }),
+      toolStart('SubagentHandback', 'other', '', 'u-hb', { ts: T + 30, agentId: 'a1' }),
+      ev({ id: FINISH, kind: 'agent_finish', ts: T + 10, agentId: 'a1', source: 'transcript' }),
+      ev({
+        kind: 'tool_end',
+        ts: T + 40,
+        agentId: 'a1',
+        tool: { name: 'SubagentHandback', category: 'other', useId: 'u-hb' },
+      }),
+      ev({ id: FINISH, kind: 'agent_finish', ts: T + 50, agentId: 'a1', source: 'hook' }),
+    ]);
+    const done = l.timeline('sess-1').filter((s) => s.kind === 'subagent_done');
+    expect(done).toHaveLength(1);
+  });
+
+  it('a second id for a finish that already landed adds no step', () => {
+    const T = 1_000_000;
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'agent_spawn', ts: T, agentId: 'a1', label: 'one' }),
+      ev({ id: 'sess-1:agent:a1:finish', kind: 'agent_finish', ts: T + 10, agentId: 'a1' }),
+      ev({ id: 'sess-1:agent:a1:finish:1', kind: 'agent_finish', ts: T + 11, agentId: 'a1' }),
+    ]);
+    const done = l.timeline('sess-1').filter((s) => s.kind === 'subagent_done');
+    expect(done).toHaveLength(1);
+  });
+
+  it('a hand-back landing after agent_finish does not revive the subagent', () => {
+    const T = 1_000_000;
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'agent_spawn', ts: T, agentId: 'a1', label: 'one' }),
+      ev({ kind: 'agent_finish', ts: T + 10, agentId: 'a1' }),
+      ev({
+        kind: 'tool_start',
+        ts: T + 20,
+        agentId: 'a1',
+        tool: { name: 'SubagentHandback', category: 'delegate', useId: 'u-hb', finalizing: true },
+      }),
+    ]);
+    expect(l.snapshot(EMPTY, opts(T + 100)).sessions[0]?.subagents[0]?.status).toBe('done');
+  });
+});
+
+describe('SessionLedger — resumed subagents', () => {
+  const T = 1_000_000;
+  const FINISH = 'sess-1:agent:a1:finish';
+  const finish = (ts: number, source: StationEvent['source'] = 'hook'): StationEvent =>
+    ev({ id: FINISH, kind: 'agent_finish', ts, agentId: 'a1', source });
+  const statusOf = (l: SessionLedger, now: number): string | undefined =>
+    l.snapshot(EMPTY, opts(now)).sessions[0]?.subagents[0]?.status;
+  const doneSteps = (l: SessionLedger) =>
+    l.timeline('sess-1').filter((s) => s.kind === 'subagent_done');
+
+  it('a resumed subagent goes active on new work and finishes again with its fixed id', () => {
+    const l = new SessionLedger();
+    l.applyEvents([ev({ kind: 'agent_spawn', ts: T, agentId: 'a1', label: 'one' }), finish(T + 1)]);
+    expect(statusOf(l, T + 2)).toBe('done');
+    l.applyEvents([toolStart('Read', 'read', 'a.ts', 'u1', { ts: T + 10, agentId: 'a1' })]);
+    expect(statusOf(l, T + 11)).toBe('working');
+    expect(l.applyEvents([finish(T + 20)])).toBe(true);
+    expect(statusOf(l, T + 21)).toBe('done');
+    const ids = doneSteps(l).map((s) => s.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it('the twin of a finish that landed still changes nothing', () => {
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'agent_spawn', ts: T, agentId: 'a1', label: 'one' }),
+      finish(T + 1, 'transcript'),
+    ]);
+    expect(l.applyEvents([finish(T + 2)])).toBe(false);
+    expect(doneSteps(l)).toHaveLength(1);
+  });
+
+  it('a finish rejected for being older is completed by its twin, with one step', () => {
+    const l = new SessionLedger();
+    l.applyEvents([
+      ev({ kind: 'agent_spawn', ts: T, agentId: 'a1', label: 'one' }),
+      toolStart('Read', 'read', 'a.ts', 'u1', { ts: T + 30, agentId: 'a1' }),
+      finish(T + 10, 'transcript'),
+    ]);
+    expect(statusOf(l, T + 31)).toBe('working');
+    l.applyEvents([finish(T + 40)]);
+    expect(statusOf(l, T + 41)).toBe('done');
+    expect(doneSteps(l)).toHaveLength(1);
+  });
+
+  it('an orchestrator event with a repeated id stays deduped', () => {
+    const l = new SessionLedger();
+    const e = ev({ kind: 'agent_finish', ts: T });
+    l.applyEvents([e]);
+    expect(l.applyEvents([{ ...e, ts: T + 1 }])).toBe(false);
+  });
 });
 
 describe('SessionLedger — snapshot list', () => {
@@ -485,6 +666,36 @@ describe('SessionLedger — snapshot list', () => {
     l.prune(60_000, 20_000);
     expect(l.usageBook.size).toBe(1);
     expect(l.snapshot(EMPTY, opts(60_000)).sessions.map((s) => s.id)).toEqual(['s2']);
+  });
+});
+
+describe('SessionLedger — pruning', () => {
+  it("a live session's card keeps its total as its oldest records age out", () => {
+    const l = new SessionLedger();
+    l.applyExtras([
+      extra({ ts: 1_000, model: 'm', usage: usageRec({ ts: 1_000 }) }),
+      extra({ ts: 50_000, model: 'm', usage: usageRec({ key: 'k2', ts: 50_000 }) }),
+    ]);
+    const card = () => l.snapshot(EMPTY, opts(60_000)).sessions[0]?.usage;
+    const before = card();
+    l.prune(60_000, 20_000);
+    expect(l.usageBook.size).toBe(1);
+    expect(card()).toEqual(before);
+    expect(l.usageBook.sessionByModel('sess-1')).toEqual({
+      'claude-fake-1': { input: 20, output: 40, cacheCreation: 60, cacheRead: 80 },
+    });
+  });
+
+  it('releases the totals when the session itself goes', () => {
+    const l = new SessionLedger();
+    l.applyExtras([
+      extra({ ts: 1_000, model: 'm', usage: usageRec({ ts: 1_000 }) }),
+      extra({ ts: 50_000, model: 'm', usage: usageRec({ key: 'k2', ts: 50_000 }) }),
+    ]);
+    l.prune(60_000, 20_000);
+    l.prune(200_000, 20_000);
+    expect(l.usageBook.size).toBe(0);
+    expect(l.usageBook.sessionUsage('sess-1').output).toBe(0);
   });
 });
 

@@ -1,5 +1,5 @@
 // Internal event schema and state model. Pure types — no runtime imports.
-// Raw Claude Code formats never appear here; see normalizer.ts.
+// Raw Claude Code formats never appear here; see normalizer/.
 
 export type ToolCategory =
   'read' | 'search' | 'write' | 'execute' | 'web' | 'delegate' | 'plan' | 'mcp' | 'other';
@@ -44,9 +44,13 @@ export interface StationEvent {
     ok?: boolean;
     /** Correlates tool_start/tool_end. */
     useId?: string;
+    /** The subagent's closing call: a late tool_start for it must not revive a finished agent. */
+    finalizing?: boolean;
   };
   /** Subagent type/description, e.g. "researcher". */
   label?: string;
+  /** Why an `idle` fired, when it isn't a turn ending: compaction can land mid-turn. */
+  idleReason?: 'compact';
 }
 
 export type AgentStatus = 'idle' | 'thinking' | 'working' | 'waiting' | 'done' | 'error' | 'stale';
@@ -97,6 +101,7 @@ export interface LogEntry {
   agentId: string;
   kind: StationEventKind;
   text: string;
+  source?: EventSource;
 }
 
 export interface StationSnapshot {

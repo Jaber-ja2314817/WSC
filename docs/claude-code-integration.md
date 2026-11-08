@@ -1,6 +1,6 @@
 # Claude Code integration
 
-**Verified against:** Claude Code **2.1.294**, on 2026-10-08 (live). Re-checked for **2.1.308** on 2026-10-22: hook event names and fields against the docs, transcript shapes locally (§7). Live hook run on 2.1.308: see §8.
+**Verified against:** Claude Code **2.1.294**, on 2026-10-08 (live). Re-checked for **2.1.308** on 2026-10-22: hook event names and fields against the docs, transcript shapes locally (§7). Live hook run on 2.1.308: see §8. Workflow transcript layout observed on **2.1.319** on 2026-11-07 (§7); hooks were not re-checked then.
 **Sources:**
 
 - Official docs at `code.claude.com/docs`: `hooks`, `hooks-guide`, `plugins/*`, `skills`, `sub-agents`, `memory`, `statusline` (§11, 2026-11-02).
@@ -9,33 +9,33 @@
 Facts are tagged by where they come from:
 
 - **[docs]** comes from the official docs.
-- **[observed]** was seen locally on 2.1.294.
+- **[observed]** was seen locally, on 2.1.294 unless a version is given.
 - **[decision]** is our own choice.
 
-This file is the contract for `src/shared/normalizer.ts`. That is the only code that parses raw Claude Code formats. When Claude Code changes, update this file and the normalizer together.
+This file is the contract for `src/shared/normalizer/` (`hook.ts`, `transcript.ts` and `statusline.ts`). That is the only code that parses raw Claude Code formats. When Claude Code changes, update this file and the normalizer together.
 
 ---
 
 ## 1. Hook events we subscribe to
 
-| Event                        | Why                                                                                                                                                                 |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SessionStart`               | Seat the orchestrator and create or reuse the project zone. `source` is one of `startup`, `resume`, `clear`, `compact` or `fork`. [docs]                            |
-| `SessionEnd`                 | Every agent reports in, then the seat empties. `reason` is one of `clear`, `resume`, `logout`, `prompt_input_exit` or `other`. The default timeout is 1.5 s. [docs] |
-| `UserPromptSubmit`           | The orchestrator wakes up (`user_prompt`). We never read `prompt`; `prompt_id` keys the event so the transcript's copy of the same prompt dedupes.                  |
-| `PreToolUse`                 | `tool_start` with a category.                                                                                                                                       |
-| `PostToolUse`                | `tool_end` with `ok: true`.                                                                                                                                         |
-| `PostToolUseFailure`         | `tool_end` with `ok: false`. If `is_interrupt` is false, the bubble shows an error. [docs]                                                                          |
-| `PostToolBatch`              | "Chatty" report frequency: the agent reports after each batch. [docs]                                                                                               |
-| `PermissionRequest`          | `waiting_for_user`.                                                                                                                                                 |
-| `PermissionDenied`           | Clears the waiting state; the bubble shows the denial.                                                                                                              |
-| `Notification`               | `waiting_for_user` for the types listed in §4; otherwise ignored.                                                                                                   |
-| `SubagentStart`              | `agent_spawn`. A lounge sprite takes the agent's identity.                                                                                                          |
-| `SubagentStop`               | `agent_finish`. The agent reports, then returns to the lounge.                                                                                                      |
-| `Stop`                       | The orchestrator goes `idle`.                                                                                                                                       |
-| `StopFailure`                | `agent_error` on the orchestrator. `error` holds values such as `rate_limit` or `overloaded`. [docs]                                                                |
-| `PreCompact` / `PostCompact` | `compacting` starts and ends.                                                                                                                                       |
-| `CwdChanged`                 | Recorded only. See §3.                                                                                                                                              |
+| Event                        | Why                                                                                                                                                                                                     |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SessionStart`               | Seat the orchestrator and create or reuse the project zone. `source` is one of `startup`, `resume`, `clear`, `compact` or `fork`. A compaction restarts nothing, so `compact` produces no event. [docs] |
+| `SessionEnd`                 | Every agent reports in, then the seat empties. `reason` is one of `clear`, `resume`, `logout`, `prompt_input_exit` or `other`. The default timeout is 1.5 s. [docs]                                     |
+| `UserPromptSubmit`           | The orchestrator wakes up (`user_prompt`). We never read `prompt`; `prompt_id` keys the event so the transcript's copy of the same prompt dedupes.                                                      |
+| `PreToolUse`                 | `tool_start` with a category.                                                                                                                                                                           |
+| `PostToolUse`                | `tool_end` with `ok: true`.                                                                                                                                                                             |
+| `PostToolUseFailure`         | `tool_end` with `ok: false`. [docs]                                                                                                                                                                     |
+| `PostToolBatch`              | Registered in `hooks.json`, but the normalizer ignores it. "Chatty" reports count tool calls in the director instead.                                                                                   |
+| `PermissionRequest`          | `waiting_for_user`.                                                                                                                                                                                     |
+| `PermissionDenied`           | Clears the waiting state; the bubble shows the denial.                                                                                                                                                  |
+| `Notification`               | `waiting_for_user` for the types listed in §4; otherwise ignored.                                                                                                                                       |
+| `SubagentStart`              | `agent_spawn`. A lounge sprite takes the agent's identity.                                                                                                                                              |
+| `SubagentStop`               | `agent_finish`. The agent reports, then returns to the lounge.                                                                                                                                          |
+| `Stop`                       | The orchestrator goes `idle`.                                                                                                                                                                           |
+| `StopFailure`                | `agent_error` on the orchestrator. `error` holds values such as `rate_limit` or `overloaded`. [docs]                                                                                                    |
+| `PreCompact` / `PostCompact` | `compacting` starts, then `idle` with `idleReason: 'compact'`. The dashboard doesn't count that as a turn end.                                                                                          |
+| `CwdChanged`                 | Recorded only. See §3.                                                                                                                                                                                  |
 
 Events we deliberately skip: `Setup`, `UserPromptExpansion`, `MessageDisplay`, `InstructionsLoaded`, `ConfigChange`, `DirectoryAdded`, `FileChanged`, `Worktree*`, `*ModelSwitch`, `Elicitation*`, `Task*` and `TeammateIdle`. Adding one means changing `plugin/hooks/hooks.json`, then the normalizer, then this file.
 
@@ -46,31 +46,33 @@ Every event carries these common fields [docs]: `session_id`, `transcript_path`,
 - `permission_mode` and `prompt_id` are also present on most events.
 - `agent_id` and `agent_type` are present **only when the hook fires inside a subagent**.
 
-| Event                    | Extra fields read                                                                       | → `StationEvent.kind`            |
-| ------------------------ | --------------------------------------------------------------------------------------- | -------------------------------- |
-| SessionStart             | `source`                                                                                | `session_start`                  |
-| SessionEnd               | `reason`                                                                                | `session_end`                    |
-| UserPromptSubmit         | `prompt_id` (id only; the prompt text is ignored)                                       | `user_prompt`                    |
-| PreToolUse               | `tool_name`, `tool_input` (summarized and redacted), `tool_use_id`                      | `tool_start`                     |
-| PostToolUse              | `tool_name`, `tool_use_id`, `duration_ms`                                               | `tool_end` (ok)                  |
-| PostToolUseFailure       | `tool_name`, `tool_use_id`, `is_interrupt` (the error text is dropped)                  | `tool_end` (not ok)              |
-| PostToolBatch            | `tool_calls[].tool_name` / `tool_use_id`                                                | batch marker (no kind; internal) |
-| PermissionRequest        | `tool_name`, `tool_input` (summarized)                                                  | `waiting_for_user`               |
-| PermissionDenied         | `tool_name`, `tool_use_id`                                                              | `tool_end` (not ok)              |
-| Notification             | `notification_type` (we never show `message`)                                           | `waiting_for_user`, or ignored   |
-| SubagentStart            | `agent_id`, `agent_type`                                                                | `agent_spawn`                    |
-| SubagentStop             | `agent_id`, `agent_type`, `agent_transcript_path` (`last_assistant_message` is dropped) | `agent_finish`                   |
-| Stop                     | `stop_hook_active`                                                                      | `idle`                           |
-| StopFailure              | `error` (only the enum value)                                                           | `agent_error`                    |
-| PreCompact / PostCompact | `trigger`                                                                               | `compacting` / `idle`            |
-| CwdChanged               | `old_cwd`, `new_cwd`                                                                    | none (logged only)               |
+| Event                    | Extra fields read                                                  | → `StationEvent.kind`                                    |
+| ------------------------ | ------------------------------------------------------------------ | -------------------------------------------------------- |
+| SessionStart             | `source`                                                           | `session_start` (none for `compact`)                     |
+| SessionEnd               | none                                                               | `session_end`                                            |
+| UserPromptSubmit         | `prompt_id` (id only; the prompt text is ignored)                  | `user_prompt`                                            |
+| PreToolUse               | `tool_name`, `tool_input` (summarized and redacted), `tool_use_id` | `tool_start`                                             |
+| PostToolUse              | `tool_name`, `tool_use_id`                                         | `tool_end` (ok)                                          |
+| PostToolUseFailure       | `tool_name`, `tool_use_id`, `is_interrupt` (error text dropped)    | `tool_end` (not ok), plus `idle` for an interrupted lead |
+| PostToolBatch            | none                                                               | none (ignored)                                           |
+| PermissionRequest        | `tool_name`, `tool_input` (summarized)                             | `waiting_for_user`                                       |
+| PermissionDenied         | `tool_name`, `tool_use_id`                                         | `tool_end` (not ok)                                      |
+| Notification             | `notification_type` (we never show `message`)                      | `waiting_for_user`, or ignored                           |
+| SubagentStart            | `agent_id`, `agent_type`                                           | `agent_spawn`                                            |
+| SubagentStop             | `agent_id`, `agent_type` (`last_assistant_message` is dropped)     | `agent_finish`                                           |
+| Stop                     | none                                                               | `idle`                                                   |
+| StopFailure              | none (the error text is dropped)                                   | `agent_error`                                            |
+| PreCompact / PostCompact | none                                                               | `compacting` / `idle` (`idleReason: 'compact'`)          |
+| CwdChanged               | none                                                               | none (ignored)                                           |
 
 Unknown events, unknown fields and malformed payloads are ignored, never thrown.
 
 How tool-use ids are handled:
 
-- `tool_use_id` is the dedupe key between hook events and transcript events. The id format is `${sessionId}:${agentId}:${tool_use_id}:${phase}`.
+- `tool_use_id` is the dedupe key between hook events and transcript events. The ids are `${sessionId}:tool:${tool_use_id}:start` and `${sessionId}:tool:${tool_use_id}:end`, the same in both normalizers.
 - Each tool use needs a separate start and end id, so the phase is part of the key.
+- `SubagentHandback` and `StructuredOutput` tool events carry `tool.finalizing: true`. Hooks race, so a final call's `PreToolUse` can land after the agent finished; the marker keeps that from reviving it.
+- `hookSessionInfo` also reads `transcript_path`, to backfill a session on first sight.
 
 Synthetic example of a PreToolUse from inside a subagent:
 
@@ -99,7 +101,7 @@ Synthetic example of a PreToolUse from inside a subagent:
 
 **Which project?**
 
-- `projectId` is the first 12 hex characters of `sha256(realpath(cwd))`. The display name is `basename(cwd)`. [decision]
+- `projectId` is a 12-hex FNV-1a hash of the normalized `cwd` (separators, trailing slash and drive-letter case; symlinks are not resolved). The display name is `basename(cwd)`. [decision]
 - Two sessions in the same folder share a zone; a new folder creates a new zone.
 - The project is fixed at the session's first event.
 
@@ -114,15 +116,18 @@ Synthetic example of a PreToolUse from inside a subagent:
 These set `waiting_for_user` on the attributed agent:
 
 - `PermissionRequest`
-- `Notification` where `notification_type` is one of `permission_prompt`, `idle_prompt`, `agent_needs_input` or `elicitation_dialog` [docs]
+- `Notification` where `notification_type` is one of `permission_prompt`, `idle_prompt`, `agent_needs_input`, `elicitation_dialog` or `elicitation_url_dialog` [docs]
 
-The next of these events on the same agent clears it: `PreToolUse`, `PostToolUse*`, `PermissionDenied`, `UserPromptSubmit`, `Stop` or `SubagentStop`.
+The next of these events on the same agent clears it: `PreToolUse`, `PostToolUse*`, `PermissionDenied`, `UserPromptSubmit`, `Stop` or `SubagentStop`. Two exceptions [decision]:
+
+- `PermissionRequest` has no `tool_use_id`, and each async hook is its own process, so the tool's own `PreToolUse` can land just after the wait. A `PreToolUse` for the same tool within 300 ms keeps the wait.
+- A parallel tool's end doesn't clear it: the end must match the waiting call by `tool_use_id`, or by name and summary when the wait has no id.
 
 Other notification types, such as `auth_success` and the `quota_*` types, are ignored.
 
 ## 5. Hook type: async command hook
 
-Decision: use **`type: "command"`** with **`"async": true`**, running `node "${CLAUDE_PLUGIN_ROOT}/hooks/forward.mjs"`.
+Decision: use **`type: "command"`** with **`"async": true`**, running `node` with `args: ["${CLAUDE_PLUGIN_ROOT}/hooks/forward.mjs"]`.
 
 **Exception, verified live:** `Stop` and `SessionEnd` are **synchronous**, with `timeout: 2`. In headless runs (`claude -p`), the process exits before async hooks for the final turn get to run, so the last `Stop` and the `SessionEnd` never arrived. Run synchronously, they arrive reliably. The cost is one Node start per turn end: about 20 ms measured with the app closed, because the forwarder exits as soon as it finds no runtime file. `tests/hooksConfig.test.ts` pins this split.
 
@@ -130,9 +135,10 @@ Decision: use **`type: "command"`** with **`"async": true`**, running `node "${C
 - **Why not `type: "http"`?** HTTP hooks exist [docs], but their `url` is static config. Our port can fall back from 47821 to a free port, and the token changes on every launch; both live in the runtime file. HTTP headers can only interpolate environment variables named in `allowedEnvVars`, so they cannot read a file.
 - **Forwarder contract**, regardless of async:
   - It is dependency-free Node.
-  - It has a ≤300 ms request timeout.
+  - It has a 300 ms deadline that counts Node's own boot time, with a 100 ms floor so a very slow boot still delivers the event.
+  - It uses `node:http` with `agent: false`, never global `fetch`, so `NODE_USE_ENV_PROXY` can't route the token and payload through a proxy.
   - It **always exits 0** and **never writes to stdout or stderr**.
-  - If the runtime file is missing or the connection fails, it exits immediately.
+  - If the runtime file is missing, its `pid` is dead or the connection fails, it exits immediately. Nothing is sent to a port whose recorded process is gone.
 
 **Why the forwarder never prints** [docs]:
 
@@ -150,7 +156,7 @@ Verified against the docs [docs]:
   marketplace.json    # { name: "wsc", owner: {name}, plugins: [{ name: "wsc", source: "./plugin" }] }
 plugin/
   .claude-plugin/plugin.json   # { "name": "wsc", "version", "description", "license": "MIT", ... }
-  hooks/hooks.json             # { "hooks": { "<Event>": [ { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/forward.mjs\"", "async": true } ] } ] } }
+  hooks/hooks.json             # { "hooks": { "<Event>": [ { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/forward.mjs"], "async": true } ] } ] } }
   hooks/forward.mjs
   skills/station/SKILL.md      # /station skill (commands are merged into skills)
   scripts/launch.mjs
@@ -187,6 +193,9 @@ Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-p
 ~/.claude/projects/<sanitized-cwd>/<sessionId>.jsonl                          # main thread  [docs+observed]
 ~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/agent-<id>.jsonl     # subagent     [docs+observed]
 ~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/agent-<id>.meta.json # subagent meta [observed]
+~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/workflows/<wf>/agent-<id>.jsonl     # workflow agent [observed 2.1.319]
+~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/workflows/<wf>/agent-<id>.meta.json # workflow agent meta [observed 2.1.319]
+~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/workflows/<wf>/journal.jsonl        # no assistant lines, not a transcript; ignored [observed 2.1.319]
 ```
 
 **`<sanitized-cwd>`** [observed]: the absolute cwd with `/` replaced by `-`, for example `-home-user-demo`. Prefer the `transcript_path` from hook input over building this path.
@@ -194,6 +203,13 @@ Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-p
 **`meta.json` keys** [observed]: `agentType`, `description`, `toolUseId`, `spawnDepth`, `worktreePath`, `spawnedWithWorktree`, `worktreeBranch`, `requestShape`, `requestNonInteractive`.
 
 - `toolUseId` links the subagent to the parent's `Agent` / `Task` tool_use.
+
+**Workflow agents** [observed 2.1.319]: agents started by a workflow have their own folder under `subagents/workflows/`.
+
+- Their lines carry the parent `sessionId`, so their usage counts toward the parent session. The session id comes from the path, as for subagents.
+- Their `meta.json` sits beside the transcript and has `workflowPhase` in place of `toolUseId`.
+- They never call `SubagentHandback`. Most end on a `StructuredOutput` call, which counts as their last tool only in these files, and the rest end on plain text. Without that call an agent is done after 3 quiet minutes (60 while one of its tool calls still runs); its next tool call revives it if that was wrong. A finish read from a line written in the last minute is stamped with the read time, because the hook copies of that call carry a later time than the line.
+- A long workflow can leave the main transcript quiet, so rescans treat a session as active when any tracked agent file changed recently.
 
 **JSONL line keys** [observed]: `type`, `uuid`, `parentUuid`, `timestamp` (ISO), `sessionId`, `agentId` (subagent files only), `cwd`, `isSidechain`, `version`, `message`.
 
@@ -205,8 +221,9 @@ Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-p
 **Fields used by the dashboard** [observed 2.1.308, undocumented — the docs describe only `transcript_path`]:
 
 - `assistant` lines: `requestId`, `message.id`, `message.model`, `message.stop_reason`, `gitBranch`, and `message.usage` with `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` (plus nested `cache_creation`, `server_tool_use` and others we ignore).
-- **One API message is written once per content block** (up to 5 lines seen), each with the same `message.id` + `requestId` and identical `usage`. Usage is counted once per `${message.id}:${requestId}`. Records with model `<synthetic>` or all-zero usage are skipped.
+- **One API message is written once per content block** (up to 5 lines seen), each with the same `message.id` + `requestId`. Usage is usually identical; on 2.1.292–2.1.304 `output_tokens` could grow from line to line in subagent files, and no other field differed. Usage is counted once per `${message.id}:${requestId}`, keeping the highest value of each field. Records with model `<synthetic>` or all-zero usage are skipped.
 - `user` lines carry `promptId` on every line of a turn, including tool results. A **typed prompt** is a `user` line whose `isMeta` isn't true, whose `promptSource` isn't `system` (values seen: `typed`, `system`, absent), and whose content is a string or text blocks only. It becomes `user_prompt` with id `${sessionId}:prompt:${promptId}`, which matches the hook's `prompt_id` id.
+- A lead `user` line starting `[Request interrupted` is not a prompt. It maps to `idle`, because a turn cancelled with Esc may fire no `Stop`. Sidechain lines don't count. A hook with `is_interrupt: true` gives the same `idle` straight away, which matters because the line's older time can lose to that hook's `tool_end`.
 - Subagent files carry the parent `sessionId`, so their usage counts toward the parent session.
 
 **Behavior to rely on:**
@@ -240,7 +257,8 @@ Setup: two headless `claude -p --plugin-dir ./plugin` sessions ran at the same t
    - A resumed (or background) session's transcript repeats earlier history with the same `message.id` + `requestId` under its own `sessionId`; the usage is credited to the session whose transcript file was created first.
    - In the store, an agent stale for 15 minutes or more is marked done ("lost signal"), so it never occupies a desk forever.
    - A session that `cd`s keeps its original zone; later events carry the new `cwd`, and the store pins them to the session's first project.
-9. **Backfill:** transcripts never record a session end. An orchestrator `assistant` record with `stop_reason: "end_turn"` is mapped to `idle`, so closed sessions don't stay "thinking".
+9. **Backfill:** transcripts never record a session end. An orchestrator `assistant` record with `stop_reason: "end_turn"` is mapped to `idle`, so closed sessions don't stay "thinking". The stop reason repeats on each line of a message, so the event id uses `message.id` (falling back to `uuid`).
+10. **Continued subagents:** a subagent resumed with `SendMessage` keeps its agent id and can finish again. Spawn and finish ids are fixed per agent, so a repeated finish is accepted when the agent isn't done. The transcript watcher gives later finishes their own id (`…:finish:1`).
 
 ## 9. Open questions
 
@@ -250,8 +268,10 @@ Setup: two headless `claude -p --plugin-dir ./plugin` sessions ran at the same t
 
 ## 10. Auto-launch on `SessionStart` [decision]
 
-- The forwarder reads `hook_event_name` and nothing else from the payload. When it is `SessionStart` and the app isn't running (no runtime file, or the POST is refused), it starts the app detached and exits; it still never prints and always exits 0. Measured: about 30 ms including Node startup.
-- **Where the app is:** `launch.json` in the app folder, written by the app on every start (`{version, command, args, macBundle?}`). Fallbacks: `WSC_APP_PATH`, the usual install locations, then a source checkout. On macOS a bundle is started with `open -g` so the terminal keeps focus.
+- The forwarder reads `hook_event_name` and `source` and nothing else from the payload. When it is `SessionStart` and the app isn't running, it starts the app detached and exits; it still never prints and always exits 0. Measured: about 30 ms including Node startup.
+- **What counts as not running:** no runtime file, a recorded `pid` that is dead, a refused POST, or a 401, 403 or 404 from whatever now owns the port.
+- **Only a session the user started launches it:** `source` must be `startup`, `resume` or absent (older Claude Code). `clear`, `compact` and `fork` don't, so a `/clear` or compaction in an open session can't bring back an app the user quit.
+- **Where the app is:** `launch.json` in the app folder, written by the app on every start (`{version, command, args, macBundle?}`). In an AppImage `command` is `$APPIMAGE`, because `process.execPath` is a mount that disappears on exit. Fallbacks: `WSC_APP_PATH`, the usual install locations, then a source checkout (`WSC_REPO`, or the repo the plugin lives in). On macOS a bundle is started with `open -g` so the terminal keeps focus.
 - **Arguments:** `--from-hook --hook-payload=<base64url of the raw SessionStart JSON>` (omitted above 16 KB). The app feeds the payload through `normalizeHookPayload` like any other hook, so the session shows up before its transcript exists. `--from-hook` keeps the window from taking focus unless `focusOnSessionStart` is on.
 - **One instance:** a `launching.json` marker blocks a second launch for 15 s (older markers are stale and replaced), and Electron's single-instance lock forwards a racing launch's argv to the running app.
 - **Opt out:** setting `launchOnSessionStart: false` or env `WSC_AUTOLAUNCH=0`.
@@ -272,6 +292,7 @@ Fields we read from the status line input (everything else is ignored and never 
 | `rate_limits.seven_day.resets_at`       | number, Unix epoch **seconds** |                                                               |
 
 - **What is sent** [decision]: when `rate_limits` is an object, `POST http://127.0.0.1:<port>/v1/limits` with `x-wsc-token` and body `{"session_id": "…", "rate_limits": {…}}` (`session_id` omitted when missing). `rate_limits` is passed as is; the app validates it. Nothing else from the input is sent. No `rate_limits` → no request. WSC not running → nothing happens; the bridge never launches the app.
-- **Contract** (like the hook forwarder): node builtins only, never writes to stderr, always exits 0, 250 ms POST timeout and a 300 ms hard deadline.
-- **Chaining an existing status line** [decision]: Claude Code runs one status line command. If the user already has one, the installer rewrites it to `node "<script>" --then <base64url of the original command>` and keeps the other keys (`padding`, `refreshInterval`, …). The bridge runs the original command through the shell with the same stdin bytes, concurrently with the POST, and prints its stdout (the only stdout the bridge ever writes); its stderr is discarded. The command gets 3 s; on timeout or a spawn error the bridge prints nothing. Without `--then` the bridge prints nothing, so installing it alone leaves an empty status line. `npm run statusline:uninstall` restores the original command exactly, or removes `statusLine` when there was none.
+- **Contract** (like the hook forwarder): node builtins only, never writes to stderr, always exits 0, 250 ms POST timeout and a 300 ms hard deadline. It uses `node:http` with `agent: false`, and sends nothing if the recorded `pid` is dead.
+- **Merging** [decision]: every session reports its own last-seen `rate_limits`, so an idle session can post old numbers. Per window, an earlier `resets_at` is ignored, an equal one keeps the higher percentage, and a later one wins (`mergePlanLimits` in `src/shared/usage.ts`).
+- **Chaining an existing status line** [decision]: Claude Code runs one status line command. If the user already has one, the installer rewrites it to `node "<script>" --then <base64url of the original command>` and keeps the other keys (`padding`, `refreshInterval`, …). The bridge runs the original command through the shell with the same stdin bytes, concurrently with the POST, and prints its stdout (the only stdout the bridge ever writes); its stderr is discarded. The command gets 3 s; on timeout or a spawn error the bridge prints nothing. On SIGTERM, SIGINT or SIGHUP the bridge kills the command's process group and exits 0, so cancelled refreshes leave nothing behind. On Windows the command runs in Git Bash (`CLAUDE_CODE_GIT_BASH_PATH`, then Program Files) when it is available, as Claude Code does, and otherwise in cmd.exe. Without `--then` the bridge prints nothing, so installing it alone leaves an empty status line. `npm run statusline:uninstall` restores the original command exactly, or removes `statusLine` when there was none.
 - A WSC status line is recognised by `plugin/statusline/statusline.mjs` in its command (backslashes normalised), the same way hook entries are recognised.

@@ -3,8 +3,8 @@
 // plan usage (5-hour and 7-day windows), which is nowhere else on disk. Installed into user
 // settings by scripts/install-statusline.mjs (plugins can't define a status line).
 //
-// Contract: dependency-free (node: builtins only), never writes to stderr, always exits 0, never
-// launches the app. It sends only `session_id` and `rate_limits` to WSC, nothing else from the
+// Contract: dependency-free (node: builtins only), never writes to stderr, always exits 0 (even
+// when Claude Code cancels it with a signal), never launches the app. It sends only `session_id` and `rate_limits` to WSC, nothing else from the
 // payload.
 //
 //   node statusline.mjs                      → prints nothing (an empty status line)
@@ -15,11 +15,16 @@
 // The POST and the original command run concurrently. Deadline: 300 ms without --then; with
 // --then, the command gets 3 s and the whole run ends shortly after.
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import http from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const TIMEOUT_MS = 300;
+/** process.uptime() misses the exec before Node's clock starts and the teardown after exit. */
+const EXIT_MARGIN_MS = 40;
+/** Kept even when Node boots slowly: a local POST needs a moment. */
+const MIN_BUDGET_MS = 100;
 const POST_TIMEOUT_MS = 250;
 const CHILD_TIMEOUT_MS = 3000;
 const CHILD_MARGIN_MS = 200;
@@ -42,8 +47,21 @@ function thenCommand(argv) {
 
 const chained = thenCommand(process.argv.slice(2));
 
-// Hard deadline no matter what is pending.
-setTimeout(done, chained ? CHILD_TIMEOUT_MS + CHILD_MARGIN_MS : TIMEOUT_MS).unref();
+// Hard deadline no matter what is pending. Node's boot time counts against it.
+const budget = Math.max(MIN_BUDGET_MS, TIMEOUT_MS - EXIT_MARGIN_MS - process.uptime() * 1000);
+setTimeout(done, chained ? CHILD_TIMEOUT_MS + CHILD_MARGIN_MS : budget).unref();
+
+/** Stops the running --then command and everything it started, if there is one. */
+let stopChild = () => {};
+
+// Claude Code cancels a status line run still in flight when a newer update arrives. The command
+// is in its own process group, so without this it would outlive us.
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(signal, () => {
+    stopChild();
+    done();
+  });
+}
 
 // Mirrors plugin/hooks/forward.mjs, plugin/scripts/runtime-path.mjs and src/main/runtimeFile.ts
 // — keep in sync.
@@ -69,7 +87,18 @@ function readRuntime() {
   if (!info || typeof info !== 'object') return null;
   if (!Number.isInteger(info.port) || info.port <= 0 || info.port > 65535) return null;
   if (typeof info.token !== 'string' || !info.token) return null;
-  return info;
+  return processGone(info.pid) ? null : info;
+}
+
+/** True only when the process that wrote the runtime file is certainly gone. */
+function processGone(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return err?.code === 'ESRCH'; // EPERM means it's alive under another user.
+  }
 }
 
 function readStdin() {
@@ -111,23 +140,58 @@ function limitsBody(input) {
   return JSON.stringify({ session_id: sessionId, rate_limits: limits });
 }
 
-async function post(runtime, body) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), POST_TIMEOUT_MS);
-  t.unref();
-  try {
-    const res = await fetch(`http://127.0.0.1:${runtime.port}/v1/limits`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-wsc-token': runtime.token },
-      body,
-      signal: ctrl.signal,
-    });
-    await res.body?.cancel().catch(() => {});
-  } catch {
-    // WSC not running, refused or slow: the status line must not care.
-  } finally {
-    clearTimeout(t);
-  }
+/**
+ * node:http with `agent: false`, never fetch: fetch can follow NODE_USE_ENV_PROXY and would hand
+ * the token to a proxy. WSC not running, refused or slow: the status line must not care.
+ */
+function post(runtime, body) {
+  return new Promise((resolve) => {
+    try {
+      const data = Buffer.from(body);
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port: runtime.port,
+          path: '/v1/limits',
+          method: 'POST',
+          agent: false,
+          headers: {
+            'content-type': 'application/json',
+            'content-length': data.length,
+            'x-wsc-token': runtime.token,
+          },
+        },
+        (res) => {
+          res.resume();
+          resolve();
+        },
+      );
+      const timer = setTimeout(() => {
+        req.destroy();
+        resolve();
+      }, POST_TIMEOUT_MS);
+      timer.unref();
+      req.on('close', () => clearTimeout(timer));
+      req.on('error', () => resolve());
+      req.end(data);
+    } catch {
+      resolve();
+    }
+  });
+}
+
+/**
+ * Claude Code runs status lines in Git Bash on Windows, so commands there are often bash syntax
+ * that cmd.exe (what `shell: true` means on Windows) can't run.
+ */
+function chainShell() {
+  if (process.platform !== 'win32') return true;
+  const programFiles = [process.env.ProgramFiles, process.env['ProgramFiles(x86)']];
+  const candidates = [
+    process.env.CLAUDE_CODE_GIT_BASH_PATH,
+    ...programFiles.map((dir) => dir && join(dir, 'Git', 'bin', 'bash.exe')),
+  ];
+  return candidates.find((p) => p && existsSync(p)) ?? true;
 }
 
 /** Runs the original status line command; resolves with its stdout, or null on any failure. */
@@ -136,7 +200,7 @@ function runChained(cmd, input) {
     let child;
     try {
       child = spawn(cmd, {
-        shell: true,
+        shell: chainShell(),
         stdio: ['pipe', 'pipe', 'ignore'],
         windowsHide: true,
         // Its own process group on POSIX, so a timeout also stops whatever the shell started.
@@ -152,6 +216,7 @@ function runChained(cmd, input) {
     const finish = (value) => {
       if (settled) return;
       settled = true;
+      stopChild = () => {};
       clearTimeout(timer);
       resolve(value);
     };
@@ -163,6 +228,7 @@ function runChained(cmd, input) {
         // already gone
       }
     };
+    stopChild = kill;
     const timer = setTimeout(() => {
       kill();
       finish(null);

@@ -24,5 +24,6 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm test
+      # Before the tests: tests/bundle.test.ts inspects the built main process.
       - run: npx electron-vite build
+      - run: npm test

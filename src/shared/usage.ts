@@ -110,8 +110,9 @@ export class UsageBook {
   private readonly sessions = new Map<string, SessionAgg>();
 
   /**
-   * Adds new records; returns true if anything changed. A repeat (same key) counts once; it
-   * only moves the credit to its session when it ranks lower (see UsageRecord.rank).
+   * Adds new records; returns true if anything changed. A repeat (same key) counts once: it can
+   * raise a field (streamed messages report growing output on later lines) and it moves the
+   * credit to its session when it ranks lower (see UsageRecord.rank).
    */
   add(records: Iterable<UsageRecord>): boolean {
     let added = false;
@@ -119,6 +120,7 @@ export class UsageBook {
       if (!validRecord(input)) continue;
       const known = this.byKey.get(input.key);
       if (known) {
+        if (this.grow(known, input)) added = true;
         if (this.recredit(known, input)) added = true;
         continue;
       }
@@ -131,6 +133,31 @@ export class UsageBook {
       added = true;
     }
     return added;
+  }
+
+  /** Keep the per-field maximum of a repeated response; session totals follow the difference. */
+  private grow(known: UsageRecord, repeat: UsageRecord): boolean {
+    const a = known.usage;
+    const b = repeat.usage;
+    const high = (x: number, y: number): number => (Number.isFinite(y) && y > x ? y : x);
+    const next: TokenUsage = {
+      input: high(a.input, b.input),
+      output: high(a.output, b.output),
+      cacheCreation: high(a.cacheCreation, b.cacheCreation),
+      cacheRead: high(a.cacheRead, b.cacheRead),
+    };
+    if (
+      next.input === a.input &&
+      next.output === a.output &&
+      next.cacheCreation === a.cacheCreation &&
+      next.cacheRead === a.cacheRead
+    ) {
+      return false;
+    }
+    this.aggregate(known, -1);
+    known.usage = next;
+    this.aggregate(known, 1);
+    return true;
   }
 
   /** Move a repeated response's credit to `repeat`'s session if it outranks the holder. */
@@ -149,18 +176,27 @@ export class UsageBook {
     return true;
   }
 
-  /** Drop records older than `beforeTs`; returns how many were removed. */
-  prune(beforeTs: number): number {
+  /**
+   * Drop records older than `beforeTs`; returns how many were removed. A session `keepTotals`
+   * accepts keeps its totals (they cover the whole session, not the retention period); release
+   * those with dropSession() once the session itself goes.
+   */
+  prune(beforeTs: number, keepTotals?: (sessionId: string) => boolean): number {
     const all = this.records();
     let i = 0;
     while (i < all.length && (all[i]?.ts ?? 0) < beforeTs) i++;
     if (i === 0) return 0;
     for (const r of all.slice(0, i)) {
       this.byKey.delete(r.key);
-      this.aggregate(r, -1);
+      if (!keepTotals?.(r.sessionId)) this.aggregate(r, -1);
     }
     this.list = all.slice(i);
     return i;
+  }
+
+  /** Forget a session's running totals. */
+  dropSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
   }
 
   get size(): number {
@@ -337,21 +373,33 @@ export function computeUsageStats(book: UsageBook, opts: DashboardOptions): Usag
 }
 
 /**
- * Folds a plan limits update into what is known. The newer update wins per window; a window it
- * leaves out is kept while it has not reset yet (Claude Code drops a window once it resets).
- * An update older than the known one is ignored.
+ * One window of a plan limits update. Every Claude Code process reports its own last-seen
+ * numbers, so arrival order says nothing about freshness: a later reset is a newer window, an
+ * earlier one is stale, and within one window usage only grows. A window the update leaves out
+ * is kept while it has not reset yet (Claude Code drops a window once it resets).
  */
+function mergePlanWindow(
+  prev: PlanWindow | undefined,
+  next: PlanWindow | undefined,
+  now: number,
+): PlanWindow | undefined {
+  if (!next) return prev && prev.resetsAt > now ? prev : undefined;
+  if (!prev) return next;
+  if (next.resetsAt < prev.resetsAt) return prev;
+  if (next.resetsAt === prev.resetsAt && next.usedPct < prev.usedPct) return prev;
+  return next;
+}
+
+/** Folds a plan limits update into what is known; an older update is ignored. */
 export function mergePlanLimits(
   prev: PlanLimits | undefined,
   next: PlanLimits,
   now: number,
 ): PlanLimits {
   if (prev && next.updatedAt < prev.updatedAt) return prev;
-  const keep = (w: PlanWindow | undefined): PlanWindow | undefined =>
-    w && w.resetsAt > now ? w : undefined;
   const out: PlanLimits = { updatedAt: next.updatedAt };
-  const five = next.fiveHour ?? keep(prev?.fiveHour);
-  const seven = next.sevenDay ?? keep(prev?.sevenDay);
+  const five = mergePlanWindow(prev?.fiveHour, next.fiveHour, now);
+  const seven = mergePlanWindow(prev?.sevenDay, next.sevenDay, now);
   if (five) out.fiveHour = { ...five };
   if (seven) out.sevenDay = { ...seven };
   return out;

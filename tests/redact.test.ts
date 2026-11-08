@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactSecrets, summarizeTool } from '../src/shared/redact';
+import { redactSecrets, safeLabel, summarizeTool } from '../src/shared/redact';
 
 const M = '•••';
 
@@ -28,6 +28,125 @@ describe('redactSecrets', () => {
     expect(out).toContain(M);
   });
 
+  it.each([
+    // Quoted keys
+    [`curl -d '{"password":"hunter2xx"}' x`, 'hunter2xx'],
+    [`{"api_key": "abc123 def"}`, 'abc123 def'],
+    [`{'token': 'tok3n value'}`, 'tok3n value'],
+    [`{"Authorization":"Basic dXNlcjpwYXNz"}`, 'dXNlcjpwYXNz'],
+    [String.raw`curl -d "{\"password\":\"two words\"}" x`, 'two words'],
+    // Key names
+    ['DB_PASS=hunter2', 'hunter2'],
+    ['MYSQL_PASS=hunter2', 'hunter2'],
+    ['--pass=hunter2', 'hunter2'],
+    ['AWS_ACCESS_KEY=hunter2', 'hunter2'],
+    ['PRIVATE_KEY=hunter2', 'hunter2'],
+    ['AUTH=hunter2', 'hunter2'],
+    ['CREDENTIALS=hunter2', 'hunter2'],
+    ['const dbPass = "hunter2"', 'hunter2'],
+    [`${'A'.repeat(70)}_PASSWORD=hunter2`, 'hunter2'],
+    // Cookies and custom headers
+    ['curl -H "Cookie: sessionid=hunter2" x', 'hunter2'],
+    ['curl -b "sid=hunter2" x', 'hunter2'],
+    ['curl -sS https://example.com --cookie sid=hunter2', 'hunter2'],
+    ['curl -H "X-Auth: hunter2" x', 'hunter2'],
+    // Signed URLs
+    ['curl https://example.com/a?key=hunter2', 'hunter2'],
+    ['curl "https://example.com/a?b=1&sig=hunter2"', 'hunter2'],
+    ['https://example.com/a?X-Amz-Signature=hunter2', 'hunter2'],
+    // Authorization schemes
+    ['Authorization: ApiKey abc123def', 'abc123def'],
+    ['Authorization: Bot abc123def', 'abc123def'],
+    ['Authorization: Digest username=bob', 'username=bob'],
+    // Connection strings
+    ['redis://:hunter2xx@localhost:6379/0', 'hunter2xx'],
+    ['postgres://u:p@ssw0rd@db/app', 'ssw0rd'],
+    ['postgres://u:pa/ssw0rd@db/app', 'ssw0rd'],
+    ['https://ab12cd34ef56@github.com/a/b', 'ab12cd34ef56'],
+    ['root:hunter2xx@tcp(127.0.0.1:3306)/db', 'hunter2xx'],
+    // Flags
+    ['sshpass -p hunter2 ssh host', 'hunter2'],
+    ['mysql -phunter2', 'hunter2'],
+    ['mysql -u root -phunter2 db', 'hunter2'],
+    ['curl -uadmin:hunter2 x', 'hunter2'],
+    ['curl --user=admin:hunter2 x', 'hunter2'],
+    ['tool --secret-key hunter2', 'hunter2'],
+    ['tool --api_key hunter2', 'hunter2'],
+    ['tool --key hunter2', 'hunter2'],
+    ['tool --password "correct horse battery"', 'horse battery'],
+    [String.raw`PASSWORD="ab\"c horse"`, 'horse'],
+    ['password=ab;cd1234', 'cd1234'],
+    ['password=ab,cd1234', 'cd1234'],
+    ['mysql --password \\\n  hunter2', 'hunter2'],
+    // Token shapes
+    ['ASIAABCDEFGHIJKLMNOP', 'ASIAABCDEFGHIJKLMNOP'],
+    ['glpat-abcdefghijklmnop', 'glpat-abcdefghijklmnop'],
+    ['sk_live_abcdefghijklmnop', 'sk_live_abcdefghijklmnop'],
+    ['xoxc-1234-abcdefgh', 'xoxc-1234-abcdefgh'],
+    ['xoxs-1234-abcdefgh', 'xoxs-1234-abcdefgh'],
+    ['xapp-1-abcdefgh', 'xapp-1-abcdefgh'],
+    ['npm_abcdefghij0123456789abcdefghij012345', 'npm_abcdefghij0123456789abcdefghij012345'],
+    ['eyJhbGci.eyJzdWIi.c2lnbmF0dXJl', 'eyJzdWIi'],
+    // Base64 with slashes
+    ['wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'K7MDENG'],
+    ['aws configure set aws_secret_access_key abcd/efgh', 'abcd/efgh'],
+    ['aws configure set aws_session_token hunter2', 'hunter2'],
+    // Private keys
+    [
+      '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----',
+      'MIIEvQIBADANBgkq',
+    ],
+    ['echo "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkq', 'MIIEvQIBADANBgkq'],
+  ])('redacts bypass %s', (input, secret) => {
+    const out = redactSecrets(input);
+    expect(out).not.toContain(secret);
+    expect(out).toContain(M);
+  });
+
+  it.each([
+    ['git clone git@github.com:acme/app.git'],
+    ['git clone ssh://git@github.com/acme/app.git'],
+    ['git checkout -b feature/login'],
+    ['git push -u origin main'],
+    ['curl https://example.com/a@b'],
+    ['curl https://example.com:8080/a@b'],
+    ['open http://localhost:5173/@fs/home/user/app/index.html'],
+    ['curl "https://example.com/?email=a@b.example"'],
+    ['npm install --save-dev @types/node'],
+    ['npx vitest run tests/store.test.ts'],
+    ['sort --key-file x'],
+    ['tests passed: 10'],
+    ['bypass=1 compass=2'],
+    ['author: Sam'],
+    ['echo $npm_lifecycle_event'],
+    ['mysql -u root -p db'],
+    ['mysql --protocol=tcp -P 3306'],
+    ['src/components/NavigationBar2/SideBarItem3/IndexPageWithLayout'],
+  ])('leaves %s alone', (input) => {
+    expect(redactSecrets(input)).toBe(input);
+  });
+
+  it('stays fast on adversarial runs', () => {
+    for (const unit of ['token-', 'a://', '--', 'a:b@', 'pass', ':/@', '"\\']) {
+      const input = unit.repeat(Math.ceil(4096 / unit.length));
+      const start = performance.now();
+      redactSecrets(input);
+      expect(performance.now() - start, unit).toBeLessThan(100);
+    }
+  });
+
+  it('finds a secret that sits past the scan limit once whitespace is gone', () => {
+    const secret = '0123456789abcdef0123456789abcdef01';
+    for (const gap of [4080, 70_000]) {
+      expect(redactSecrets(`${' '.repeat(gap)}${secret}`)).not.toContain('0123456789abcdef');
+    }
+  });
+
+  it('does not leave a partial secret where the scan was clipped', () => {
+    const out = redactSecrets(`${'word '.repeat(818)}abcdefghij${'x'.repeat(40)}`);
+    expect(out).not.toContain('abcdefghij');
+  });
+
   it('keeps ordinary text, long paths and identifiers', () => {
     expect(redactSecrets('npm test -- --watch')).toBe('npm test -- --watch');
     const path = 'cat /home/user/project/src/components/navigation/sidebar.tsx';
@@ -39,6 +158,48 @@ describe('redactSecrets', () => {
 
   it('never throws on non-strings', () => {
     expect(redactSecrets(undefined as unknown as string)).toBe('');
+  });
+});
+
+describe('redactSecrets: regressions', () => {
+  it.each([
+    ['R=redis://h1:6379,redis://user:hunter2xyzQ@h2:6379', 'hunter2xyzQ'],
+    [
+      'psql postgres://admin:hunter2xyzQ@db1/app,postgres://admin:hunter2xyzQ@db2/app',
+      'hunter2xyzQ',
+    ],
+    ['{"urls":["https://a.example.com","https://user:hunter2xyzQ@b.example.com"]}', 'hunter2xyzQ'],
+    ['curl "https://proxy/?target=https://user:hunter2xyzQ@b/x"', 'hunter2xyzQ'],
+    ['password=ab}hunter2xyzQ', 'hunter2xyzQ'],
+    ['token:ab}hunter2xyzQ', 'hunter2xyzQ'],
+  ])('leaks nothing from %s', (text, secret) => {
+    expect(redactSecrets(text)).not.toContain(secret);
+  });
+
+  it.each([
+    ['rg "token:" src/ -l && npm test', 'npm test'],
+    ['--user-data-dir=/tmp/a:b', '--user-data-dir=/tmp/a:b'],
+    [
+      'cat logs/9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f/subagents/agent-a1b2c3d4e5.jsonl',
+      'agent-a1b2c3d4e5.jsonl',
+    ],
+  ])('keeps %s readable', (text, kept) => {
+    expect(redactSecrets(text)).toContain(kept);
+  });
+});
+
+describe('safeLabel', () => {
+  it('redacts and truncates to one line', () => {
+    expect(safeLabel('Deploy with API_KEY=abc123def')).toBe(`Deploy with API_KEY=${M}`);
+    expect(safeLabel('a\n  b')).toBe('a b');
+    const long = safeLabel('x '.repeat(100));
+    expect(long.length).toBeLessThanOrEqual(60);
+    expect(long.endsWith('…')).toBe(true);
+    expect(safeLabel('x '.repeat(100), 10).length).toBeLessThanOrEqual(10);
+  });
+
+  it('never throws on non-strings', () => {
+    expect(safeLabel(undefined as unknown as string)).toBe('');
   });
 });
 

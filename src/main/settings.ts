@@ -1,6 +1,6 @@
 // Persisted user settings + window state, in the app's userData folder (never event contents).
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { CameraState, WindowMode } from '@shared/ipc';
 import { mergeSettings, parseSettings, type Settings } from '@shared/settings';
 
@@ -23,6 +23,41 @@ function readJson(file: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+type SettingsFile =
+  | { state: 'missing' }
+  /** Exists but isn't a JSON object, so it can't be used and must not be overwritten either. */
+  | { state: 'corrupt' }
+  | { state: 'ok'; raw: Record<string, unknown> };
+
+function readSettingsFile(file: string): SettingsFile {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'missing' }
+      : { state: 'corrupt' };
+  }
+  try {
+    const raw = JSON.parse(text) as unknown;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      return { state: 'ok', raw: raw as Record<string, unknown> };
+    }
+  } catch {
+    // reported below
+  }
+  return { state: 'corrupt' };
+}
+
+/** `prices` entries the parser refused. There is no UI for prices, so these are hand edits. */
+function refusedPrices(raw: Record<string, unknown>, parsed: Settings): Record<string, unknown> {
+  const prices = raw['prices'];
+  if (!prices || typeof prices !== 'object' || Array.isArray(prices)) return {};
+  return Object.fromEntries(
+    Object.entries(prices).filter(([key]) => !Object.hasOwn(parsed.prices, key)),
+  );
 }
 
 /** Atomic write, user-only permissions. Errors are swallowed: settings are never critical. */
@@ -78,10 +113,22 @@ export class SettingsStore {
   private win: WindowState;
   private listeners = new Set<(s: Settings, prev: Settings) => void>();
   private winSaveTimer: NodeJS.Timeout | null = null;
+  private refused: Record<string, unknown> = {};
+  private warningText: string | undefined;
 
   constructor(private readonly dir: string) {
-    this.current = parseSettings(readJson(this.settingsPath));
+    const file = readSettingsFile(this.settingsPath);
+    this.current = parseSettings(file.state === 'ok' ? file.raw : undefined);
+    if (file.state === 'ok') this.noteRefused(file.raw, this.current);
+    if (file.state === 'corrupt') {
+      this.warningText = 'settings.json could not be read, so WSC is using default settings.';
+    }
     this.win = parseWindowState(readJson(this.windowPath));
+  }
+
+  /** Something the user should know about settings.json. */
+  get warning(): string | undefined {
+    return this.warningText;
   }
 
   get settingsPath(): string {
@@ -96,10 +143,25 @@ export class SettingsStore {
     return this.current;
   }
 
+  /**
+   * The file wins over what was loaded: settings.json is meant to be edited by hand (prices have
+   * no UI) while the app keeps running, so a save must not put old values back.
+   */
   update(patch: unknown): Settings {
     const prev = this.current;
-    this.current = mergeSettings(prev, patch);
-    writeJson(this.settingsPath, this.current);
+    const file = readSettingsFile(this.settingsPath);
+    const canWrite = file.state !== 'corrupt' || this.setCorruptFileAside();
+    const base = file.state === 'ok' ? parseSettings(file.raw) : prev;
+    this.current = mergeSettings(base, patch);
+    if (file.state === 'ok') this.noteRefused(file.raw, base);
+    const setsPrices = !!patch && typeof patch === 'object' && 'prices' in patch;
+    if (setsPrices) this.refused = {};
+    if (canWrite) {
+      writeJson(this.settingsPath, {
+        ...this.current,
+        prices: { ...this.refused, ...this.current.prices },
+      });
+    }
     for (const fn of this.listeners) {
       try {
         fn(this.current, prev);
@@ -108,6 +170,28 @@ export class SettingsStore {
       }
     }
     return this.current;
+  }
+
+  private noteRefused(raw: Record<string, unknown>, parsed: Settings): void {
+    this.refused = refusedPrices(raw, parsed);
+    const names = Object.keys(this.refused);
+    if (names.length > 0) {
+      this.warningText = `Ignoring invalid prices in settings.json: ${names.slice(0, 3).join(', ')}.`;
+    } else if (this.warningText?.startsWith('Ignoring')) {
+      this.warningText = undefined;
+    }
+  }
+
+  /** Moves an unreadable settings.json out of the way. False if it is still in the way. */
+  private setCorruptFileAside(): boolean {
+    const aside = `${this.settingsPath}.corrupt-${Date.now()}`;
+    try {
+      renameSync(this.settingsPath, aside);
+      this.warningText = `settings.json could not be read. It was saved as ${basename(aside)}.`;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   onChange(fn: (s: Settings, prev: Settings) => void): () => void {

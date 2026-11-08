@@ -9,6 +9,7 @@ import {
   type ProjectState,
   type SessionState,
   type StationEvent,
+  type StationEventKind,
   type StationSnapshot,
 } from './types';
 
@@ -36,6 +37,19 @@ interface AgentMeta {
 }
 
 const ENDED_USE_IDS_CAP = 64;
+/**
+ * Async hooks are separate processes, so a tool's PreToolUse can land just after its own
+ * PermissionRequest. A same-name tool_start this close to the wait doesn't end it.
+ */
+const WAIT_RACE_MS = 300;
+/** Hook and transcript report one idle/compacting with different ids and times (dashboard's value). */
+const LOG_TWIN_MS = 10_000;
+/** What a session that really ended needs to come back; other late events stay ignored. */
+const REOPENS_ENDED: ReadonlySet<StationEventKind> = new Set([
+  'session_start',
+  'user_prompt',
+  'agent_spawn',
+]);
 
 export class StationStore {
   private readonly logCap: number;
@@ -48,8 +62,8 @@ export class StationStore {
   private readonly sessions = new Map<string, SessionState>();
   private readonly agents = new Map<string, AgentState>();
   private readonly meta = new Map<string, AgentMeta>();
-  /** Removed sessions → their end ts; late events at or before it are ignored. */
-  private readonly removedSessions = new Map<string, number>();
+  /** Removed sessions: late events at or before `ts` are ignored; see REOPENS_ENDED for `ended`. */
+  private readonly removedSessions = new Map<string, { ts: number; ended: boolean }>();
   /** Projects removed by the user → removal ts; only newer activity brings them back. */
   private readonly removedProjects = new Map<string, number>();
   private readonly seen = new Set<string>();
@@ -123,7 +137,7 @@ export class StationStore {
   }
 
   clearIdleProjects(now: number, idleMs: number): void {
-    let changed = false;
+    const cleared = new Set<string>();
     for (const project of [...this.projects.values()]) {
       if (now - project.lastEventAt <= idleMs) continue;
       for (const sid of [...project.sessionIds]) {
@@ -131,9 +145,11 @@ export class StationStore {
         this.removeSession(sid, s?.endedAt ?? s?.lastEventAt ?? now);
       }
       this.projects.delete(project.id);
-      changed = true;
+      cleared.add(project.id);
     }
-    if (changed) this.emit();
+    if (cleared.size === 0) return;
+    this.log = this.log.filter((e) => !cleared.has(e.projectId));
+    this.emit();
   }
 
   /**
@@ -194,7 +210,8 @@ export class StationStore {
     if (typeof sessionId !== 'string' || !sessionId) return false;
     if (typeof projectId !== 'string' || !projectId) return false;
     if (typeof kind !== 'string') return false;
-    if (this.seen.has(id)) return false;
+    const repeat = this.seen.has(id);
+    if (repeat && !this.finishStillDue(raw)) return false;
 
     const ev: StationEvent = {
       ...raw,
@@ -202,9 +219,19 @@ export class StationStore {
       agentId: typeof raw.agentId === 'string' && raw.agentId ? raw.agentId : ORCHESTRATOR_ID,
     };
 
-    const removedAt = this.removedSessions.get(sessionId);
-    if (removedAt !== undefined) {
-      if (ev.ts <= removedAt) return false;
+    const removed = this.removedSessions.get(sessionId);
+    if (kind === 'session_end' && !this.sessions.has(sessionId)) {
+      // Nothing to end: creating state here would leave an empty zone behind. Keep a tombstone
+      // so a late backfill of this closed session can't bring it back as a live one.
+      this.removedSessions.set(sessionId, {
+        ts: Math.max(removed?.ts ?? ev.ts, ev.ts),
+        ended: true,
+      });
+      return false;
+    }
+    if (removed !== undefined) {
+      if (ev.ts <= removed.ts) return false;
+      if (removed.ended && !REOPENS_ENDED.has(kind)) return false;
       this.removedSessions.delete(sessionId);
     }
     const projectRemovedAt = this.removedProjects.get(projectId);
@@ -223,14 +250,31 @@ export class StationStore {
     const session = this.ensureSession(ev, project);
     const agent = this.ensureAgent(ev, session);
 
+    const wasDone = agent.status === 'done';
     this.applyKind(ev, session, agent);
 
     project.lastEventAt = Math.max(project.lastEventAt, ev.ts);
     session.lastEventAt = Math.max(session.lastEventAt, ev.ts);
     agent.lastEventAt = Math.max(agent.lastEventAt, ev.ts);
     this.eventsReceived++;
-    this.appendLog(ev);
+    // One finish reaches here twice (hook and transcript): only the copy that landed gets a row.
+    if (ev.kind !== 'agent_finish' || (!wasDone && agent.status === 'done')) {
+      this.appendLog(ev, repeat);
+    }
     return true;
+  }
+
+  /**
+   * A finish id is fixed per agent, but one finish may need to land twice: a subagent continued
+   * later finishes again, and a hook twin must still land when the transcript copy lost to the
+   * ts guard (line time always precedes hook receive time). Older copies stay ignored.
+   */
+  private finishStillDue(ev: StationEvent): boolean {
+    if (ev.kind !== 'agent_finish' || !Number.isFinite(ev.ts)) return false;
+    const key = agentKey(ev.sessionId, ev.agentId);
+    const agent = this.agents.get(key);
+    if (!agent || agent.status === 'done' || agent.status === 'error') return false;
+    return ev.ts >= this.metaOf(key).statusTs;
   }
 
   private applyKind(ev: StationEvent, session: SessionState, agent: AgentState): void {
@@ -267,15 +311,27 @@ export class StationStore {
       case 'tool_start': {
         agent.toolCalls++;
         const useId = tool?.useId;
-        const alreadyEnded = useId !== undefined && this.metaOf(key).endedUseIds.includes(useId);
-        if (tool && !alreadyEnded) {
-          this.setStatus(agent, 'working', ev.ts, {
-            name: tool.name,
-            category: tool.category,
-            ...(tool.summary !== undefined ? { summary: tool.summary } : {}),
-            ...(useId !== undefined ? { useId } : {}),
-          });
+        const meta = this.metaOf(key);
+        if (!tool || (useId !== undefined && meta.endedUseIds.includes(useId))) break;
+        // Hooks race: the hand-back's PreToolUse can land after SubagentStop.
+        if (tool.finalizing === true && agent.status === 'done' && !agent.isOrchestrator) break;
+        const wait = agent.currentTool;
+        if (
+          agent.status === 'waiting' &&
+          wait?.name === tool.name &&
+          (wait.useId === undefined || wait.useId === useId) &&
+          ev.ts - meta.statusTs <= WAIT_RACE_MS
+        ) {
+          const sameCall = tool.summary === undefined || tool.summary === wait.summary;
+          if (useId !== undefined && wait.useId === undefined && sameCall) wait.useId = useId;
+          break;
         }
+        this.setStatus(agent, 'working', ev.ts, {
+          name: tool.name,
+          category: tool.category,
+          ...(tool.summary !== undefined ? { summary: tool.summary } : {}),
+          ...(useId !== undefined ? { useId } : {}),
+        });
         break;
       }
 
@@ -289,19 +345,28 @@ export class StationStore {
         // A finished subagent stays done: its hand-back call's result lands after agent_finish.
         if (agent.status === 'done' && !agent.isOrchestrator) break;
         const current = agent.currentTool;
+        // Parallel tools: ending A must not clear B's pending permission prompt.
+        if (agent.status === 'waiting' && !endsWait(current, tool)) break;
         // Parallel tools: ending A while B is the current tool keeps B working.
-        const endsCurrent = !current || current.useId === undefined || current.useId === useId;
-        if (endsCurrent) this.setStatus(agent, 'thinking', ev.ts, undefined);
+        const ownEnd = current?.useId !== undefined && current.useId === useId;
+        const endsCurrent = !current || current.useId === undefined || ownEnd;
+        // A tool's own end is final whatever its timestamp: transcript line times precede the
+        // hook receive time of the same tool_start, and the hook twin of this end is deduped.
+        if (endsCurrent) this.setStatus(agent, 'thinking', ev.ts, undefined, ownEnd);
         break;
       }
 
       case 'waiting_for_user': {
+        // A permission request has no tool use id: keep the one of the call it is about.
+        const current = agent.currentTool;
+        const sameCall = current?.name === tool?.name && current?.summary === tool?.summary;
+        const waitUseId = tool?.useId ?? (sameCall ? current?.useId : undefined);
         const waitTool: CurrentTool | undefined = tool
           ? {
               name: tool.name,
               category: tool.category,
               ...(tool.summary !== undefined ? { summary: tool.summary } : {}),
-              ...(tool.useId !== undefined ? { useId: tool.useId } : {}),
+              ...(waitUseId !== undefined ? { useId: waitUseId } : {}),
             }
           : agent.currentTool;
         this.setStatus(agent, 'waiting', ev.ts, waitTool);
@@ -335,16 +400,20 @@ export class StationStore {
     if (session.endedAt !== undefined && ts > session.endedAt) delete session.endedAt;
   }
 
-  /** Returns false (no change) when the event is older than the agent's last status change. */
+  /**
+   * Returns false (no change) when the event is older than the agent's last status change,
+   * unless `force` says it applies whatever its timestamp.
+   */
   private setStatus(
     agent: AgentState,
     status: AgentStatus,
     ts: number,
     tool: CurrentTool | undefined,
+    force = false,
   ): boolean {
     const m = this.metaOf(agentKey(agent.sessionId, agent.id));
-    if (ts < m.statusTs) return false;
-    m.statusTs = ts;
+    if (ts < m.statusTs && !force) return false;
+    m.statusTs = Math.max(m.statusTs, ts);
     const toolChanged =
       agent.currentTool?.name !== tool?.name ||
       agent.currentTool?.useId !== tool?.useId ||
@@ -456,25 +525,62 @@ export class StationStore {
     this.sessions.delete(sessionId);
     const p = this.projects.get(s.projectId);
     if (p) p.sessionIds = p.sessionIds.filter((id) => id !== sessionId);
-    this.removedSessions.set(sessionId, endedAt);
+    this.removedSessions.set(sessionId, { ts: endedAt, ended: s.endedAt !== undefined });
   }
 
-  private appendLog(ev: StationEvent): void {
+  private appendLog(ev: StationEvent, repeat: boolean): void {
     const entry: LogEntry = {
-      id: ev.id,
+      // A repeated finish reuses its event id; the panels key log rows by id.
+      id: repeat ? `${ev.id}:${ev.ts}` : ev.id,
       ts: ev.ts,
       projectId: ev.projectId,
       sessionId: ev.sessionId,
       agentId: ev.agentId,
       kind: ev.kind,
       text: logText(ev),
+      source: ev.source,
     };
+    if (this.hasLogTwin(entry)) return;
     // Keep chronological order even when events arrive out of order.
     let i = this.log.length;
     while (i > 0 && (this.log[i - 1]?.ts ?? 0) > entry.ts) i--;
     this.log.splice(i, 0, entry);
     if (this.log.length > this.logCap) this.log.splice(0, this.log.length - this.logCap);
   }
+
+  /**
+   * True when the hook/transcript twin of this idle or compacting entry is already logged.
+   * Two entries from one source are two real events.
+   */
+  private hasLogTwin(entry: LogEntry): boolean {
+    if (entry.kind !== 'idle' && entry.kind !== 'compacting') return false;
+    for (let i = this.log.length - 1; i >= 0; i--) {
+      const e = this.log[i];
+      if (!e || e.ts > entry.ts + LOG_TWIN_MS) continue;
+      if (e.ts < entry.ts - LOG_TWIN_MS) return false;
+      if (
+        e.kind === entry.kind &&
+        e.source !== entry.source &&
+        e.sessionId === entry.sessionId &&
+        e.agentId === entry.agentId
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+/**
+ * Whether a tool_end clears a wait. A permission wait can lack a use id (the request has none),
+ * so it falls back to the call's name and summary; a transcript end carries no summary.
+ */
+function endsWait(wait: CurrentTool | undefined, ended: StationEvent['tool']): boolean {
+  if (!wait || !ended) return true;
+  if (wait.useId !== undefined) return wait.useId === ended.useId;
+  return (
+    wait.name === ended.name && (ended.summary === undefined || ended.summary === wait.summary)
+  );
 }
 
 /** Short human text. Uses only the already-sanitized tool summary — never raw input. */

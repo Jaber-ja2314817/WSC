@@ -108,8 +108,13 @@ Linux).
 | `prices`               | `{}`    | Optional cost estimate, USD per million tokens by model-id substring (no prices are built in) |
 | `port`                 | `47821` | Preferred local port (falls back to a free one)                                               |
 
+You can also edit `settings.json` by hand, even while WSC runs: saves re-read the file first, so
+your edits are kept. If the file can't be parsed, WSC runs on defaults, shows a banner, and keeps
+your file as `settings.json.corrupt-<timestamp>` before it next saves.
+
 `prices` example (fill in the numbers from your own price list) — a model is priced by the longest
-key its id contains, and costs are shown only when every model in the range has a price:
+key its id contains, and costs are shown only when every model in the range has a price. An invalid
+entry is ignored with a banner, and stays in the file for you to fix:
 
 ```json
 "prices": {

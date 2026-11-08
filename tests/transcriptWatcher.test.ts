@@ -4,7 +4,7 @@ import { appendFileSync } from 'node:fs';
 import { appendFile, mkdir, mkdtemp, rm, truncate, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Station } from '../src/main/station';
 import {
   classifyTranscriptPath,
@@ -12,6 +12,7 @@ import {
   type WatcherBatch,
 } from '../src/main/transcriptWatcher';
 import type { TranscriptExtras } from '../src/shared/dashboardTypes';
+import { buildDemoScript } from '../src/shared/demoScript';
 import { ORCHESTRATOR_ID, type StationEvent } from '../src/shared/types';
 
 const MIN = 60_000;
@@ -81,6 +82,15 @@ const extras = (initial?: boolean): TranscriptExtras[] =>
 
 const mainPath = (sid: string): string => join(root, PROJ, `${sid}.jsonl`);
 const subDir = (sid: string): string => join(root, PROJ, sid, 'subagents');
+const wfDir = (sid: string, wf = 'wf_0001'): string => join(subDir(sid), 'workflows', wf);
+
+/** A tool call from a subagent's transcript. */
+const agentLine = (ts: number, sid: string, agentId: string, useId: string, name: string): string =>
+  JSON.stringify({
+    ...(JSON.parse(toolUse(ts, sid, useId, name, { file_path: `${CWD}/s.ts` })) as object),
+    agentId,
+    isSidechain: true,
+  });
 
 async function writeLines(path: string, lines: string[], mtime = NOW - MIN): Promise<void> {
   await writeFile(path, lines.map((l) => `${l}\n`).join(''));
@@ -123,6 +133,14 @@ describe('classifyTranscriptPath', () => {
       agentId: 'ab12',
     });
     expect(classifyTranscriptPath(root, join(subDir(SA), 'agent-ab12.meta.json'))).toBeNull();
+    expect(classifyTranscriptPath(root, join(wfDir(SA), 'agent-ab12.jsonl'))).toEqual({
+      kind: 'sub',
+      sessionId: SA,
+      agentId: 'ab12',
+      workflow: true,
+    });
+    expect(classifyTranscriptPath(root, join(wfDir(SA), 'journal.jsonl'))).toBeNull();
+    expect(classifyTranscriptPath(root, join(wfDir(SA), 'x', 'agent-ab12.jsonl'))).toBeNull();
     expect(classifyTranscriptPath(root, '/elsewhere/x.jsonl')).toBeNull();
     expect(classifyTranscriptPath(root, join(root, 'x.jsonl'))).toBeNull();
   });
@@ -404,6 +422,232 @@ describe('TranscriptWatcher incremental reads', () => {
   });
 });
 
+describe('TranscriptWatcher workflow agents', () => {
+  beforeEach(async () => {
+    await mkdir(wfDir(SA), { recursive: true });
+    await writeLines(mainPath(SA), [toolUse(NOW - 9 * MIN, SA, 'toolu_m', 'Workflow', {})]);
+  });
+
+  it('counts their tokens and attributes them to the parent session', async () => {
+    await writeFile(
+      join(wfDir(SA), 'agent-wf01.meta.json'),
+      JSON.stringify({ agentType: 'reviewer', description: 'fake' }),
+    );
+    await writeFile(join(wfDir(SA), 'journal.jsonl'), '{"type":"started","agentId":"wf01"}\n');
+    await writeLines(join(wfDir(SA), 'agent-wf01.jsonl'), [
+      agentLine(NOW - 2 * MIN, SA, 'wf01', 'toolu_w1', 'Read'),
+    ]);
+    const w = makeWatcher();
+    await w.start();
+    expect(w.trackedFiles).toBe(2); // the journal is not a transcript
+
+    const spawn = events().find((e) => e.kind === 'agent_spawn');
+    expect(spawn).toMatchObject({ sessionId: SA, agentId: 'wf01', label: 'reviewer' });
+    expect(extras().filter((x) => x.agentId === 'wf01')).toHaveLength(1);
+  });
+
+  it('discovers new ones in a rescan, in a workflow folder that did not exist yet', async () => {
+    const w = makeWatcher();
+    await w.start();
+    batches = [];
+    await mkdir(wfDir(SA, 'wf_0002'), { recursive: true });
+    await writeLines(join(wfDir(SA, 'wf_0002'), 'agent-wf02.jsonl'), [
+      agentLine(NOW - MIN, SA, 'wf02', 'toolu_w2', 'Read'),
+    ]);
+    await w.poll();
+    expect(events(false).some((e) => e.agentId === 'wf02' && e.kind === 'tool_start')).toBe(true);
+  });
+
+  it('keeps reading a workflow while the main transcript has gone quiet', async () => {
+    await writeLines(
+      mainPath(SA),
+      [toolUse(NOW - 2 * DAY, SA, 'toolu_m', 'Workflow', {})],
+      NOW - 2 * DAY,
+    );
+    const file = join(wfDir(SA), 'agent-wf01.jsonl');
+    await writeLines(file, [agentLine(NOW - 2 * MIN, SA, 'wf01', 'toolu_w1', 'Read')]);
+    const w = makeWatcher();
+    await w.start();
+    batches = [];
+
+    await appendFile(file, `${agentLine(NOW - MIN, SA, 'wf01', 'toolu_w2', 'Read')}\n`);
+    await writeLines(join(wfDir(SA), 'agent-wf02.jsonl'), [
+      agentLine(NOW - MIN, SA, 'wf02', 'toolu_w3', 'Read'),
+    ]);
+    await w.poll();
+    const started = events(false).filter((e) => e.kind === 'tool_start');
+    expect(started.map((e) => e.agentId).sort()).toEqual(['wf01', 'wf02']);
+  });
+
+  it('finishes on the StructuredOutput call that ends one; a plain subagent keeps going', async () => {
+    await mkdir(subDir(SB), { recursive: true });
+    await writeLines(mainPath(SB), [toolUse(NOW - 9 * MIN, SB, 'toolu_mb', 'Agent', {})]);
+    await writeLines(join(wfDir(SA), 'agent-wf01.jsonl'), [
+      agentLine(NOW - MIN, SA, 'wf01', 'toolu_w1', 'StructuredOutput'),
+    ]);
+    await writeLines(join(subDir(SB), 'agent-sub1.jsonl'), [
+      agentLine(NOW - MIN, SB, 'sub1', 'toolu_s1', 'StructuredOutput'),
+    ]);
+    await makeWatcher().start();
+    const finished = events().filter((e) => e.kind === 'agent_finish');
+    expect(finished.map((e) => e.agentId)).toEqual(['wf01']);
+  });
+
+  it('stamps a live finish at read time, so its own hook copies cannot outrun it', async () => {
+    const w = makeWatcher();
+    await w.start();
+    await writeLines(join(wfDir(SA), 'agent-wf01.jsonl'), [
+      agentLine(NOW - 30_000, SA, 'wf01', 'toolu_w1', 'StructuredOutput'),
+    ]);
+    await w.poll();
+    expect(events(false).find((e) => e.kind === 'agent_finish')?.ts).toBe(NOW);
+  });
+
+  it('keeps line time for a finish read from history', async () => {
+    await writeLines(join(wfDir(SA), 'agent-wf01.jsonl'), [
+      agentLine(NOW - 30_000, SA, 'wf01', 'toolu_w1', 'StructuredOutput'),
+    ]);
+    await makeWatcher().start();
+    expect(events().find((e) => e.kind === 'agent_finish')?.ts).toBe(NOW - 30_000);
+  });
+
+  it('a rescan does not reread files that have not changed', async () => {
+    await writeLines(join(wfDir(SA), 'agent-wf01.jsonl'), [
+      agentLine(NOW - 30_000, SA, 'wf01', 'toolu_w1', 'Read'),
+    ]);
+    const w = makeWatcher();
+    await w.start();
+    const read = vi.spyOn(w as unknown as { readAppended: () => Promise<void> }, 'readAppended');
+    await w.poll();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('finishes a quiet one much sooner than a plain subagent', async () => {
+    await mkdir(subDir(SB), { recursive: true });
+    await writeLines(mainPath(SB), [toolUse(NOW - 9 * MIN, SB, 'toolu_mb', 'Agent', {})]);
+    const ended = (useId: string, sid: string, id: string): string[] => [
+      agentLine(NOW - 5 * MIN, sid, id, useId, 'Read'),
+      toolResult(NOW - 5 * MIN, sid, useId),
+    ];
+    await writeLines(
+      join(wfDir(SA), 'agent-wf01.jsonl'),
+      ended('toolu_w1', SA, 'wf01'),
+      NOW - 4 * MIN,
+    );
+    await writeLines(
+      join(subDir(SB), 'agent-sub1.jsonl'),
+      ended('toolu_s1', SB, 'sub1'),
+      NOW - 4 * MIN,
+    );
+    // Still inside a tool call: not over, however quiet.
+    await writeLines(
+      join(wfDir(SA), 'agent-wf02.jsonl'),
+      [agentLine(NOW - 5 * MIN, SA, 'wf02', 'toolu_w2', 'Bash')],
+      NOW - 4 * MIN,
+    );
+    await makeWatcher().start();
+    const finished = events().filter((e) => e.kind === 'agent_finish');
+    expect(finished.map((e) => e.agentId)).toEqual(['wf01']);
+  });
+});
+
+describe('TranscriptWatcher continued subagents', () => {
+  const file = (): string => join(subDir(SA), 'agent-sub1.jsonl');
+
+  beforeEach(async () => {
+    await mkdir(subDir(SA), { recursive: true });
+    await writeLines(mainPath(SA), [toolUse(NOW - 9 * MIN, SA, 'toolu_m', 'Agent', {})]);
+    await writeLines(file(), [
+      agentLine(NOW - 8 * MIN, SA, 'sub1', 'toolu_1', 'Read'),
+      agentLine(NOW - 7 * MIN, SA, 'sub1', 'toolu_2', 'SubagentHandback'),
+    ]);
+  });
+
+  it('finishes again, under a new id, when one hands back a second time', async () => {
+    const w = makeWatcher();
+    await w.start();
+    await appendFile(file(), `${agentLine(NOW - 3 * MIN, SA, 'sub1', 'toolu_3', 'Read')}\n`);
+    await w.poll();
+    await appendFile(
+      file(),
+      `${agentLine(NOW - 2 * MIN, SA, 'sub1', 'toolu_4', 'SubagentHandback')}\n`,
+    );
+    await w.poll();
+    expect(
+      events()
+        .filter((e) => e.kind === 'agent_finish')
+        .map((e) => e.id),
+    ).toEqual([`${SA}:agent:sub1:finish`, `${SA}:agent:sub1:finish:1`]);
+  });
+
+  it('counts a hand-back once when the file is read again from the start', async () => {
+    const w = makeWatcher();
+    await w.start();
+    await truncate(file(), 0);
+    await w.poll();
+    await writeLines(file(), [agentLine(NOW - 7 * MIN, SA, 'sub1', 'toolu_2', 'SubagentHandback')]);
+    await w.poll();
+    expect(events().filter((e) => e.kind === 'agent_finish')).toHaveLength(1);
+  });
+
+  it('can go quiet and finish again after working past its hand-back', async () => {
+    let now = NOW;
+    const w = makeWatcher({ now: () => now });
+    await w.start();
+    await appendFile(file(), `${toolResult(NOW - 6 * MIN, SA, 'toolu_1')}\n`);
+    await appendFile(file(), `${toolResult(NOW - 6 * MIN, SA, 'toolu_2')}\n`);
+    await appendFile(file(), `${agentLine(NOW - MIN, SA, 'sub1', 'toolu_3', 'Read')}\n`);
+    await appendFile(file(), `${toolResult(NOW - MIN, SA, 'toolu_3')}\n`);
+    await utimes(file(), (NOW - MIN) / 1000, (NOW - MIN) / 1000);
+    await w.poll();
+    now = NOW + 20 * MIN;
+    await w.poll();
+    expect(
+      events()
+        .filter((e) => e.kind === 'agent_finish')
+        .map((e) => e.id),
+    ).toEqual([`${SA}:agent:sub1:finish`, `${SA}:agent:sub1:finish:1`]);
+  });
+});
+
+describe('TranscriptWatcher rescan cost', () => {
+  it(
+    'does not stall the event loop with thousands of old sessions',
+    { timeout: 60_000 },
+    async () => {
+      const dir = join(root, PROJ);
+      const old = (NOW - 3 * DAY) / 1000;
+      const sessions = Array.from({ length: 4_000 }, (_, i) => `s${i}`);
+      for (let i = 0; i < sessions.length; i += 200) {
+        await Promise.all(
+          sessions.slice(i, i + 200).map(async (sid) => {
+            await writeFile(join(dir, `${sid}.jsonl`), '');
+            await utimes(join(dir, `${sid}.jsonl`), old, old);
+            await mkdir(join(dir, sid));
+          }),
+        );
+      }
+      const w = makeWatcher({ lookbackDays: 1 });
+      await w.start();
+
+      let worst = 0;
+      let last = performance.now();
+      let polling = true;
+      const beat = (): void => {
+        const t = performance.now();
+        worst = Math.max(worst, t - last);
+        last = t;
+        if (polling) setImmediate(beat);
+      };
+      setImmediate(beat);
+      await w.poll();
+      polling = false;
+      await new Promise((r) => setImmediate(r)); // let the heartbeat see a stall at the very end
+      expect(worst).toBeLessThan(300); // about 3 s when each session searched the whole list
+    },
+  );
+});
+
 describe('TranscriptWatcher project attribution', () => {
   const withCwd = (line: string, cwd: string): string =>
     JSON.stringify({ ...(JSON.parse(line) as object), cwd });
@@ -561,6 +805,165 @@ describe('Station + watcher + dashboard ledger', () => {
     expect(dashes.at(-1)).toBe(1);
     await new Promise((r) => setTimeout(r, 250));
     expect(pushed.at(-1)).toEqual([SB]);
+  });
+
+  it('a line written during the startup scan reaches the floor', async () => {
+    // Backfill runs before the scan reads the file, so only the scan can see this line.
+    await writeLines(mainPath(SA), [
+      toolUse(Date.now() + MIN, SA, 'toolu_new', 'Bash', { command: 'npm test' }),
+    ]);
+    station = new Station({
+      version: 'test',
+      offline: true,
+      watchTranscripts: true,
+      liveWatch: false,
+      projectsDir: root,
+      onSnapshot: () => undefined,
+    });
+    await station.start();
+    await station.transcriptScan;
+    expect(Object.keys(station.snapshot().sessions)).toEqual([SA]);
+  });
+
+  it('a second hand-back marks a continued subagent done', async () => {
+    await mkdir(subDir(SA), { recursive: true });
+    await writeLines(mainPath(SA), [toolUse(Date.now() - MIN, SA, 'toolu_m', 'Agent', {})]);
+    const file = join(subDir(SA), 'agent-sub1.jsonl');
+    station = new Station({
+      version: 'test',
+      offline: true,
+      watchTranscripts: true,
+      liveWatch: false,
+      projectsDir: root,
+      onSnapshot: () => undefined,
+    });
+    await station.start();
+    await station.transcriptScan;
+    const line = (useId: string, name: string, ago: number): string =>
+      `${agentLine(Date.now() - ago, SA, 'sub1', useId, name)}\n`;
+    const status = (): string | undefined =>
+      Object.values(station!.snapshot().agents).find((a) => a.id === 'sub1')?.status;
+
+    await writeFile(file, line('toolu_1', 'SubagentHandback', 30_000));
+    await station.pollTranscripts();
+    expect(status()).toBe('done');
+    await appendFile(file, line('toolu_2', 'Read', 20_000));
+    await station.pollTranscripts();
+    expect(status()).not.toBe('done');
+    await appendFile(file, line('toolu_3', 'SubagentHandback', 10_000));
+    await station.pollTranscripts();
+    expect(status()).toBe('done');
+  });
+
+  it('a session first seen after a cd lands in the zone it started in', async () => {
+    await writeLines(mainPath(SA), [
+      toolUse(Date.now() - MIN, SA, 'toolu_1', 'Read', { file_path: `${CWD}/a.ts` }),
+    ]);
+    station = new Station({ version: 'test', offline: true, onSnapshot: () => undefined });
+    await station.start();
+    const hook = (id: string): Record<string, unknown> => ({
+      hook_event_name: 'PreToolUse',
+      session_id: SA,
+      cwd: `${CWD}/packages/ui`,
+      transcript_path: mainPath(SA),
+      tool_name: 'Bash',
+      tool_use_id: id,
+      tool_input: { command: 'npm test' },
+    });
+    station.ingestHookPayload(hook('toolu_2'));
+    station.ingestHookPayload(hook('toolu_3')); // a second hook while the backfill runs
+    await vi.waitFor(() => {
+      const names = Object.values(station!.snapshot().projects).map((p) => p.name);
+      expect(names).toEqual(['proj-a']);
+      expect(station!.snapshot().agents[`${SA}:${ORCHESTRATOR_ID}`]?.currentTool?.useId).toBe(
+        'toolu_3',
+      );
+    });
+  });
+
+  describe('an unpinned demo', () => {
+    const hook = (name: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      hook_event_name: name,
+      session_id: SA,
+      cwd: CWD,
+      ...extra,
+    });
+    const fakeTool = { tool_name: 'Bash', tool_use_id: 'toolu_1', tool_input: { command: 'ls' } };
+
+    beforeEach(async () => {
+      station = new Station({ version: 'test', offline: true, onSnapshot: () => undefined });
+      await station.start();
+      station.startDemo();
+    });
+
+    it("outlasts the wrap-up of the turn that started it, and keeps it off the demo's floor", () => {
+      station!.ingestHookPayload(hook('PostToolUse', fakeTool));
+      station!.ingestHookPayload(hook('Stop'));
+      expect(station!.mode).toBe('demo');
+      expect(station!.snapshot().sessions[SA]).toBeUndefined();
+    });
+
+    it.each([
+      ['SessionStart', {}],
+      ['UserPromptSubmit', {}],
+      ['PreToolUse', fakeTool],
+    ])('gives way to real work: %s', (name, extra) => {
+      station!.ingestHookPayload(hook(name, extra));
+      expect(station!.mode).toBe('live');
+      expect(Object.keys(station!.snapshot().sessions)).toEqual([SA]);
+    });
+
+    it('keeps a backfill that was already running off its floor', async () => {
+      station!.stopDemo();
+      await writeLines(mainPath(SA), [
+        toolUse(Date.now() - MIN, SA, 'toolu_1', 'Read', { file_path: `${CWD}/a.ts` }),
+      ]);
+      station!.ingestHookPayload(
+        hook('PostToolUse', { ...fakeTool, transcript_path: mainPath(SA) }),
+      );
+      station!.startDemo();
+      await vi.waitFor(() => expect(station!.getDashboard().sessions.length).toBeGreaterThan(0));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(station!.snapshot().sessions[SA]).toBeUndefined();
+      expect(Object.values(station!.snapshot().projects).map((p) => p.name)).not.toContain(
+        'proj-a',
+      );
+    });
+  });
+
+  describe('ledger pruning', () => {
+    const prune = (s: Station): void => (s as unknown as { pruneLedger(): void }).pruneLedger();
+
+    it('keeps a week of usage however short the lookback', async () => {
+      await writeLines(mainPath(SA), [
+        toolUse(Date.now() - 3 * DAY, SA, 'toolu_1', 'Read', { file_path: `${CWD}/a.ts` }),
+      ]);
+      station = new Station({
+        version: 'test',
+        offline: true,
+        watchTranscripts: true,
+        liveWatch: false,
+        projectsDir: root,
+        tuning: { lookbackDays: 1 },
+        onSnapshot: () => undefined,
+      });
+      await station.start();
+      await station.transcriptScan;
+      expect(station.getDashboard().usage.weeklyTotal).toBe(60);
+      prune(station);
+      expect(station.getDashboard().usage.weeklyTotal).toBe(60);
+    });
+
+    it('drops demo history within the hour, so a looping demo cannot grow for days', async () => {
+      station = new Station({ version: 'test', offline: true, onSnapshot: () => undefined });
+      await station.start();
+      station.startDemo(true);
+      const inner = station as unknown as { ingestDemo(evs: StationEvent[]): void };
+      inner.ingestDemo(buildDemoScript(Date.now() - 2 * HOUR).map((s) => s.event));
+      expect(station.getDashboard().sessions.length).toBeGreaterThan(0);
+      prune(station);
+      expect(station.getDashboard().sessions).toEqual([]);
+    });
   });
 
   it('demo mode shows synthetic usage on the dashboard', async () => {

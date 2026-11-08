@@ -7,11 +7,20 @@ import {
   decodeHookPayload,
   enclosingAppBundle,
   launchFilePath,
+  modeFromArgs,
   parseHookArgs,
   writeLaunchInfo,
 } from '../src/main/launchInfo';
 
 const enc = (v: unknown): string => Buffer.from(JSON.stringify(v), 'utf8').toString('base64url');
+
+describe('modeFromArgs', () => {
+  it('maps the demo flags to a station mode', () => {
+    expect(modeFromArgs(['wsc'])).toBe('live');
+    expect(modeFromArgs(['wsc', '--play-demo'])).toBe('demo');
+    expect(modeFromArgs(['wsc', '--demo'])).toBe('demo-pinned');
+  });
+});
 
 describe('buildLaunchInfo', () => {
   it('packaged macOS: points at the enclosing .app bundle', () => {
@@ -46,6 +55,19 @@ describe('buildLaunchInfo', () => {
       platform: 'linux',
     });
     expect(info).toEqual({ version: '1.0.0', command: '/opt/WSC/wsc', args: [] });
+  });
+
+  it('packaged AppImage: the AppImage, not its temporary mount', () => {
+    const env = {
+      version: '1.0.0',
+      execPath: '/tmp/.mount_WSCabc/wsc',
+      appPath: '/tmp/.mount_WSCabc/resources/app.asar',
+      isPackaged: true,
+      platform: 'linux' as const,
+      appImage: '/home/user/Apps/WSC.AppImage',
+    };
+    expect(buildLaunchInfo(env).command).toBe('/home/user/Apps/WSC.AppImage');
+    expect(buildLaunchInfo({ ...env, platform: 'darwin' }).command).toBe(env.execPath);
   });
 
   it('unpackaged: the electron binary plus the app folder', () => {

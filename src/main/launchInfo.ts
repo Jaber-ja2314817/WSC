@@ -22,6 +22,8 @@ export interface LaunchEnv {
   appPath: string;
   isPackaged: boolean;
   platform: NodeJS.Platform;
+  /** $APPIMAGE: execPath is inside a mount that disappears when the app exits. */
+  appImage?: string;
 }
 
 /** The `.app` folder that contains `execPath`, if any (e.g. /Applications/WSC.app). */
@@ -37,7 +39,8 @@ export function buildLaunchInfo(env: LaunchEnv): LaunchInfo {
     // Dev/unpackaged: the electron binary plus the app folder (runs the last `out/` build).
     return { version: env.version, command: env.execPath, args: [env.appPath] };
   }
-  const info: LaunchInfo = { version: env.version, command: env.execPath, args: [] };
+  const command = env.platform === 'linux' && env.appImage ? env.appImage : env.execPath;
+  const info: LaunchInfo = { version: env.version, command, args: [] };
   if (env.platform === 'darwin') {
     const bundle = enclosingAppBundle(env.execPath, '/');
     if (bundle) info.macBundle = bundle;
@@ -65,11 +68,22 @@ export function writeLaunchInfo(info: LaunchInfo): void {
 // ── startup args from the hook forwarder ─────────────────────────────────────
 // `--from-hook`                 started (or poked) by the SessionStart hook: don't steal focus
 // `--hook-payload=<base64url>`  the raw hook JSON that triggered the launch (≤ 16 KB decoded)
+// `--play-demo`                 `/station demo`: a demo that gives way to real activity
+// `--demo`                      `npm run demo`: a pinned demo that ignores hooks
 
 export const FROM_HOOK_ARG = '--from-hook';
 export const HOOK_PAYLOAD_ARG = '--hook-payload=';
 export const MAX_HOOK_PAYLOAD_BYTES = 16 * 1024;
 const BASE64URL = /^[A-Za-z0-9_-]+={0,2}$/;
+
+export const DEMO_ARG = '--demo';
+export const PLAY_DEMO_ARG = '--play-demo';
+
+/** The station mode these startup args ask for. */
+export function modeFromArgs(argv: readonly string[]): 'live' | 'demo' | 'demo-pinned' {
+  if (argv.includes(DEMO_ARG)) return 'demo-pinned';
+  return argv.includes(PLAY_DEMO_ARG) ? 'demo' : 'live';
+}
 
 export interface HookArgs {
   fromHook: boolean;

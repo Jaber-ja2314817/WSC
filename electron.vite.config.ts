@@ -5,7 +5,11 @@ import preact from '@preact/preset-vite';
 const shared = { '@shared': resolve('src/shared') };
 
 export default defineConfig({
-  main: { resolve: { alias: shared } },
+  main: {
+    resolve: { alias: shared },
+    // The packaged app ships no node_modules: bundle runtime deps (tests/bundle.test.ts enforces it).
+    build: { externalizeDeps: { exclude: ['zod'] } },
+  },
   preload: {
     resolve: { alias: shared },
     // Sandboxed preloads must be a single CommonJS file.

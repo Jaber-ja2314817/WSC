@@ -61,8 +61,22 @@ export class ThemeManager {
     return [...builtIns, ...users];
   }
 
+  /** True for a theme from the user themes folder, as opposed to a bundled one. */
+  isUserTheme(id: string): boolean {
+    return BUILT_IN_MANIFESTS[id] === undefined;
+  }
+
   /** Load a theme by id without applying it. Never rejects; falls back to Spaceship + warning. */
   async load(id: string): Promise<LoadedTheme> {
+    try {
+      return await this.loadUnsafe(id);
+    } catch (e) {
+      const res = await loadBuiltInTheme(DEFAULT_THEME_ID);
+      return { ...res, warning: `Theme "${id}" failed to load (${String(e)}). Using Spaceship.` };
+    }
+  }
+
+  private async loadUnsafe(id: string): Promise<LoadedTheme> {
     if (BUILT_IN_MANIFESTS[id] !== undefined) return loadBuiltInTheme(id);
     const data = this.api ? await this.api.getUserTheme(id).catch(() => null) : null;
     if (!data) {

@@ -26,6 +26,35 @@ describe('normalizeHookPayload — event mapping', () => {
     });
   });
 
+  it('SessionStart from a compaction restarts nothing; every other source does', () => {
+    expect(normalizeHookPayload(hookPayload('SessionStart', { source: 'compact' }), T)).toEqual([]);
+    for (const source of ['startup', 'resume', 'clear']) {
+      expect(one(hookPayload('SessionStart', { source })).kind).toBe('session_start');
+    }
+  });
+
+  it('PostCompact is an idle marked as compaction; Stop is not marked', () => {
+    expect(one(hookPayload('PostCompact', { trigger: 'auto' })).idleReason).toBe('compact');
+    expect(one(hookPayload('Stop')).idleReason).toBeUndefined();
+  });
+
+  it('marks only the hand-back call as finalizing', () => {
+    const start = (name: string) => one(toolPayload('PreToolUse', name, {}, 't1')).tool;
+    expect(start('SubagentHandback')?.finalizing).toBe(true);
+    expect(start('Read')).not.toHaveProperty('finalizing');
+  });
+
+  it('sanitizes subagent labels from a delegate call and from agent_type', () => {
+    const input = { description: 'go API_KEY=fakesecret123' };
+    const e = one(toolPayload('PreToolUse', 'Agent', input, 't1'));
+    expect(e.label).toContain('go API_KEY=');
+    expect(JSON.stringify(e)).not.toContain('fakesecret123');
+    const typed = one(
+      hookPayload('SubagentStart', {}, { agentId: 'agent-a1', agentType: 'token=fakesecret123' }),
+    );
+    expect(JSON.stringify(typed)).not.toContain('fakesecret123');
+  });
+
   it('SessionEnd → session_end', () => {
     expect(one(hookPayload('SessionEnd', { reason: 'other' })).kind).toBe('session_end');
   });
@@ -65,11 +94,18 @@ describe('normalizeHookPayload — event mapping', () => {
     });
   });
 
-  it('PostToolUseFailure and PermissionDenied → tool_end not ok', () => {
-    const f = one({
+  it('an interrupted tool ends the lead turn, since no Stop follows', () => {
+    const payload = {
       ...toolPayload('PostToolUseFailure', 'Bash', { command: 'x' }),
       is_interrupt: true,
-    });
+    };
+    expect(normalizeHookPayload(payload, 1_000).map((e) => e.kind)).toEqual(['tool_end', 'idle']);
+    const sub = { ...payload, agent_id: 'agent-a1' };
+    expect(normalizeHookPayload(sub, 1_000).map((e) => e.kind)).toEqual(['tool_end']);
+  });
+
+  it('PostToolUseFailure and PermissionDenied → tool_end not ok', () => {
+    const f = one(toolPayload('PostToolUseFailure', 'Bash', { command: 'x' }));
     expect(f.tool?.ok).toBe(false);
     const d = one(toolPayload('PermissionDenied', 'Bash', { command: 'x' }));
     expect(d).toMatchObject({ kind: 'tool_end', tool: { ok: false } });

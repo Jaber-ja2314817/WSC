@@ -1,5 +1,15 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -256,6 +266,29 @@ describe('install-hooks.mjs', () => {
       expect(backups()).toEqual([]);
     },
   );
+
+  it.skipIf(process.platform === 'win32')('keeps a symlinked settings file a symlink', () => {
+    const target = join(dir, 'dotfiles', 'claude-settings.json');
+    mkdirSync(join(dir, 'dotfiles'));
+    writeFileSync(target, `${JSON.stringify(userSettings(), null, 2)}\n`);
+    symlinkSync(target, file);
+    const inTarget = () => JSON.parse(readFileSync(target, 'utf8')) as Settings;
+    expect(cli('install').code).toBe(0);
+    expect(lstatSync(file).isSymbolicLink()).toBe(true);
+    expect(wscHandlers(inTarget(), 'Stop')).toHaveLength(1);
+    expect(readdirSync(join(dir, 'dotfiles'))).toEqual(['claude-settings.json']);
+    expect(cli('uninstall').code).toBe(0);
+    expect(lstatSync(file).isSymbolicLink()).toBe(true);
+    expect(wscHandlers(inTarget(), 'Stop')).toHaveLength(0);
+  });
+
+  it.skipIf(process.platform === 'win32')('writes through a dangling symlink', () => {
+    const target = join(dir, 'dotfiles', 'claude-settings.json');
+    symlinkSync(target, file);
+    expect(cli('install').code).toBe(0);
+    expect(lstatSync(file).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, 'utf8')).toContain('forward.mjs');
+  });
 
   it('rejects unknown commands', () => {
     const r = cli('explode');

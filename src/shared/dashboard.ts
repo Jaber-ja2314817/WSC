@@ -24,6 +24,8 @@ export const DEFAULT_MAX_SESSIONS = 30;
 const SEEN_CAP = 5_000;
 /** Hook and transcript copies of one prompt / turn end land within this of each other. */
 export const COLLAPSE_MS = 10_000;
+/** A store `waiting` older than this is an abandoned session (killed terminal, no SessionEnd). */
+export const WAITING_CAP_MS = 24 * 3_600_000;
 const COLLAPSE_KINDS = new Set<TimelineKind>(['prompt', 'turn_end']);
 
 const READ_TOOLS = new Set(['Read']);
@@ -95,6 +97,8 @@ interface LedgerAgent {
   toolCalls: number;
   /** Consecutive Read starts in the current turn. */
   readRun: number;
+  /** Became active after its last "finished" step, so another finish is a new hand-back. */
+  activeSinceDone: boolean;
 }
 
 interface LedgerSession {
@@ -117,6 +121,8 @@ interface LedgerSession {
   agents: Map<string, LedgerAgent>;
   turn?: TurnState;
   turnTs: number;
+  /** The turn state a compaction interrupted, restored when it finishes. */
+  preCompactTurn?: TurnState;
   lastBusyAt: number;
   lastToolStep?: Step;
 }
@@ -201,10 +207,13 @@ export class SessionLedger {
   /** Drop usage records and sessions with no activity within `retentionMs`. */
   prune(now: number, retentionMs: number): void {
     const cutoff = now - retentionMs;
-    this.usageBook.prune(cutoff);
     for (const [id, s] of this.sessions) {
-      if (s.lastActivityAt < cutoff) this.sessions.delete(id);
+      if (s.lastActivityAt >= cutoff) continue;
+      this.sessions.delete(id);
+      this.usageBook.dropSession(id);
     }
+    // A live session's card keeps its total even as its oldest records age out.
+    this.usageBook.prune(cutoff, (id) => this.sessions.has(id));
   }
 
   // ── internals ────────────────────────────────────────────────────────────
@@ -274,7 +283,8 @@ export class SessionLedger {
     if (!isStr(ev.id) || !isStr(ev.sessionId) || !isStr(ev.kind)) return false;
     if (!Number.isFinite(ev.ts)) return false;
     const known = this.sessions.get(ev.sessionId);
-    if (known?.seen.has(ev.id)) return false;
+    const again = known?.seen.has(ev.id) === true;
+    if (again && !this.finishesAgain(known, ev)) return false;
     const s = this.ensure(ev.sessionId, ev.ts, ev.projectId, ev.projectName);
     s.seen.add(ev.id);
     if (s.seen.size > SEEN_CAP) {
@@ -291,6 +301,7 @@ export class SessionLedger {
       if (ev.ts >= s.turnTs) {
         s.turn = t;
         s.turnTs = ev.ts;
+        delete s.preCompactTurn;
       }
     };
     const busy = (): void => {
@@ -300,6 +311,10 @@ export class SessionLedger {
       if (agent && ev.ts >= agent.statusTs) {
         agent.status = status;
         agent.statusTs = ev.ts;
+        // A tool result can land after the finish; only new work starts a new stretch.
+        if (status !== 'done' && status !== 'error' && ev.kind !== 'tool_end') {
+          agent.activeSinceDone = true;
+        }
       }
     };
     const reopen = (): void => {
@@ -330,11 +345,13 @@ export class SessionLedger {
         if (!isLead) this.addStep(s, ev, 'subagent', logText(ev));
         break;
       case 'tool_start': {
-        busy();
+        // Hooks race: a subagent's hand-back can land after its finish, and must not revive it.
+        const lateFinal = ev.tool?.finalizing === true && agent?.status === 'done';
+        if (!lateFinal) busy();
         if (isLead) setTurn('busy');
         if (agent) {
           agent.toolCalls++;
-          setAgent('working');
+          if (!lateFinal) setAgent('working');
         }
         const name = ev.tool?.name ?? 'tool';
         let readCount: number | undefined;
@@ -379,10 +396,16 @@ export class SessionLedger {
         setAgent('waiting');
         this.addStep(s, ev, 'wait', logText(ev));
         break;
-      case 'agent_finish':
+      case 'agent_finish': {
         setAgent('done');
-        if (!isLead) this.addStep(s, ev, 'subagent_done', logText(ev));
+        // One step per stretch of work, however many copies of the finish arrive.
+        if (isLead || !agent?.activeSinceDone) break;
+        const step = this.addStep(s, ev, 'subagent_done', logText(ev));
+        // One lifecycle id per agent: a later hand-back's step still needs its own key.
+        if (again) step.id = `${ev.id}:${ev.ts}`;
+        if (agent) agent.activeSinceDone = false;
         break;
+      }
       case 'agent_error':
         setAgent('error');
         if (isLead) setTurn('turn_end');
@@ -390,11 +413,20 @@ export class SessionLedger {
         break;
       case 'compacting':
         busy();
-        if (isLead) setTurn('busy');
+        if (isLead) {
+          const interrupted = s.turn !== 'busy' ? s.turn : s.preCompactTurn;
+          setTurn('busy');
+          if (interrupted) s.preCompactTurn = interrupted;
+        }
         setAgent('thinking');
         this.addStep(s, ev, 'compact', logText(ev));
         break;
       case 'idle':
+        if (ev.idleReason === 'compact') {
+          // Not a turn end: mid-turn stays busy, and a compaction between turns goes back.
+          if (isLead && s.preCompactTurn && ev.ts >= s.turnTs) setTurn(s.preCompactTurn);
+          break;
+        }
         setAgent('idle');
         if (isLead) {
           setTurn('turn_end');
@@ -405,6 +437,18 @@ export class SessionLedger {
         break;
     }
     return true;
+  }
+
+  /**
+   * Lifecycle ids are fixed per agent, so a resumed subagent's next finish repeats one. It still
+   * counts while the agent isn't finished; the twin of a finish that landed changes nothing.
+   */
+  private finishesAgain(s: LedgerSession | undefined, ev: StationEvent): boolean {
+    if (ev.kind !== 'agent_finish' || !isStr(ev.agentId) || ev.agentId === ORCHESTRATOR_ID) {
+      return false;
+    }
+    const a = s?.agents.get(ev.agentId);
+    return !!a && a.status !== 'done' && a.status !== 'error';
   }
 
   private ensureAgent(s: LedgerSession, id: string, ev: StationEvent): LedgerAgent {
@@ -419,6 +463,7 @@ export class SessionLedger {
         lastEventAt: ev.ts,
         toolCalls: 0,
         readRun: 0,
+        activeSinceDone: true,
       };
       s.agents.set(id, a);
     }
@@ -486,12 +531,22 @@ export class SessionLedger {
     while (i > 0 && (s.steps[i - 1]?.ts ?? 0) > step.ts) i--;
     s.steps.splice(i, 0, step);
     if (s.steps.length > this.timelineCap) {
-      for (const dropped of s.steps.splice(0, s.steps.length - this.timelineCap)) {
-        if (dropped.useId !== undefined && s.stepsByUse.get(dropped.useId) === dropped) {
-          s.stepsByUse.delete(dropped.useId);
-        }
+      const [dropped] = s.steps.splice(this.evictionIndex(s), 1);
+      if (dropped?.useId !== undefined && s.stepsByUse.get(dropped.useId) === dropped) {
+        s.stepsByUse.delete(dropped.useId);
       }
     }
+  }
+
+  /** A workflow's subagents would flood the lead out, so its steps keep up to half the cap. */
+  private evictionIndex(s: LedgerSession): number {
+    let lead = 0;
+    let oldestSub = -1;
+    s.steps.forEach((st, i) => {
+      if (st.agentId === ORCHESTRATOR_ID) lead++;
+      else if (oldestSub < 0) oldestSub = i;
+    });
+    return oldestSub >= 0 && lead < this.timelineCap / 2 ? oldestSub : 0;
   }
 
   private publicStep(s: LedgerSession, st: Step): TimelineStep {
@@ -520,7 +575,9 @@ export class SessionLedger {
     opts: DashboardOptions,
   ): DashStatus {
     if (this.ended(s, station) !== undefined) return 'ended';
-    const quiet = opts.now - s.lastActivityAt >= opts.idleMs;
+    const silent = opts.now - s.lastActivityAt;
+    const quiet = silent >= opts.idleMs;
+    const abandoned = silent >= WAITING_CAP_MS;
     if (station?.sessions?.[s.id] && agents.length > 0) {
       let waiting = false;
       let busy = false;
@@ -529,10 +586,10 @@ export class SessionLedger {
         else if (a.status === 'working' || a.status === 'thinking') busy = true;
         else if (a.status === 'stale' && !quiet) busy = true;
       }
-      if (waiting) return 'waiting';
+      if (waiting && !abandoned) return 'waiting';
       if (busy) return 'working';
     }
-    if (quiet) return 'idle';
+    if (quiet || abandoned) return 'idle';
     if (s.turn === 'turn_end' || s.turn === 'waiting') return 'waiting';
     if (opts.now - s.lastBusyAt < opts.idleMs) return 'working';
     return 'idle';

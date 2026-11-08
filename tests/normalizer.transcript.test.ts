@@ -12,7 +12,7 @@ import {
   type TranscriptContext,
 } from '../src/shared/normalizer/transcript';
 import { projectIdFor } from '../src/shared/projects';
-import { ORCHESTRATOR_ID } from '../src/shared/types';
+import { ORCHESTRATOR_ID, type StationEvent } from '../src/shared/types';
 
 const SESSION = 'sess-0001';
 const CWD = '/home/user/proj-a';
@@ -141,6 +141,52 @@ describe('normalizeTranscriptLine', () => {
       id: `${SESSION}:idle:u1`,
     });
     expect(normalizeTranscriptLine(endTurn({ agentId: 'abc' }), ctx())).toEqual([]);
+  });
+
+  it('one message spanning several end_turn lines is one turn end', () => {
+    const endTurn = (uuid: string): StationEvent | undefined =>
+      normalizeTranscriptLine(
+        line({
+          type: 'assistant',
+          uuid,
+          message: { id: 'msg_1', content: [{ type: 'text', text: 'x' }], stop_reason: 'end_turn' },
+        }),
+        ctx(),
+      )[0];
+    expect(endTurn('u1')?.id).toBe(`${SESSION}:idle:msg_1`);
+    expect(endTurn('u2')?.id).toBe(endTurn('u1')?.id);
+  });
+
+  it('marks only the hand-back tool_use as finalizing', () => {
+    const toolUse = (name: string): StationEvent | undefined =>
+      normalizeTranscriptLine(
+        assistant([{ type: 'tool_use', id: 't1', name, input: {} }]),
+        ctx({ agentId: 's1' }),
+      )[0];
+    expect(toolUse('SubagentHandback')?.tool?.finalizing).toBe(true);
+    expect(toolUse('Read')?.tool).not.toHaveProperty('finalizing');
+  });
+
+  it('sanitizes subagent labels, not just summaries', () => {
+    const key = 'API_KEY=fakesecret123';
+    const [ev] = normalizeTranscriptLine(
+      assistant([
+        { type: 'tool_use', id: 't1', name: 'Agent', input: { description: `go ${key}` } },
+      ]),
+      ctx(),
+    );
+    expect(ev?.label).toContain('go API_KEY=');
+    const [meta] = normalizeSubagentMeta(
+      { description: `go ${key}` },
+      { sessionId: SESSION, agentId: 's1', cwd: CWD, ts: 1 },
+    );
+    expect(JSON.stringify([ev, meta])).not.toContain('fakesecret123');
+    const long = 'x '.repeat(100);
+    const [spawn] = normalizeSubagentMeta(
+      { description: long },
+      { sessionId: SESSION, agentId: 's1', cwd: CWD, ts: 1 },
+    );
+    expect(spawn?.label?.length).toBeLessThanOrEqual(60);
   });
 
   it('maps compact_boundary to compacting', () => {
@@ -472,7 +518,21 @@ describe('typed prompts', () => {
     expect(kinds(prompt([]))).toEqual([]);
     expect(kinds(prompt('<command-name>/model</command-name>'))).toEqual([]);
     expect(kinds(prompt('<local-command-stdout>fake</local-command-stdout>'))).toEqual([]);
-    expect(kinds(prompt([{ type: 'text', text: '[Request interrupted by user]' }]))).toEqual([]);
+  });
+
+  it('an interrupted turn is no prompt, it ends the turn for the lead only', () => {
+    const interrupted = '[Request interrupted by user]';
+    const forTool = '[Request interrupted by user for tool use]';
+    const [ev, ...rest] = normalizeTranscriptLine(
+      prompt([{ type: 'text', text: interrupted }]),
+      ctx(),
+    );
+    expect(rest).toEqual([]);
+    expect(ev).toMatchObject({ kind: 'idle', id: `${SESSION}:idle:u1`, agentId: ORCHESTRATOR_ID });
+    expect(kinds(prompt(forTool))).toEqual(['idle']);
+    expect(kinds(prompt(interrupted, { isSidechain: true }))).toEqual([]);
+    expect(kinds(prompt(interrupted, { agentId: 'agent-s1' }))).toEqual([]);
+    expect(kinds(prompt(interrupted), ctx({ agentId: 's1' }))).toEqual([]);
   });
 
   it('only counts orchestrator prompts (a subagent task prompt is not the user typing)', () => {

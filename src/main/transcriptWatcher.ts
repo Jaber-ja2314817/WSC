@@ -2,6 +2,7 @@
 // subagents whose work only shows up in their transcript.
 //   <root>/<proj>/<sessionId>.jsonl                                  orchestrator
 //   <root>/<proj>/<sessionId>/subagents/agent-<id>.jsonl (+ .meta.json) subagent
+//   <root>/<proj>/<sessionId>/subagents/workflows/<wf>/agent-<id>.jsonl (+ .meta.json) workflow agent
 // Parsing lives in src/shared/normalizer/transcript.ts; this module only finds files, reads
 // appended bytes and splits them into lines. Every entry point is total: missing dirs,
 // permission errors and bad files are skipped. Nothing read here is written anywhere.
@@ -19,9 +20,13 @@ import {
 } from '@shared/normalizer/transcript';
 import { projectIdFor, projectNameFor } from '@shared/projects';
 import { ORCHESTRATOR_ID, type StationEvent, type ToolCategory } from '@shared/types';
-import { claudeProjectsDir } from './backfill';
+import { agentTranscripts, claudeProjectsDir, isTerminalTool, WORKFLOW_QUIET_MS } from './backfill';
 
 const DAY_MS = 24 * 60 * 60_000;
+/** A transcript line younger than this was written live, not read from history. */
+const FRESH_LINE_MS = 60_000;
+/** Rescans back up fs.watch, so they only look at what changed lately: this runs when idle. */
+const RESCAN_RECENT_MS = 60 * 60_000;
 const DEFAULT_CHUNK_BYTES = 2 * 1024 * 1024;
 const DEFAULT_DEBOUNCE_MS = 100;
 const DEFAULT_RESCAN_MS = 10_000;
@@ -30,7 +35,6 @@ const MAX_REMAINDER_BYTES = 64 * 1024 * 1024;
 const NEWLINE = 0x0a;
 /** Old files take the usage-only path; only lines containing this can carry usage. */
 const USAGE_NEEDLE = Buffer.from('"usage"');
-const HANDBACK_TOOL = 'SubagentHandback';
 /**
  * A subagent quiet this long without a hand-back is over (interrupted, or its hand-back went
  * unrecorded) — the backfill's rule. With a tool call still running, it gets much longer.
@@ -72,6 +76,14 @@ export interface TranscriptWatcherOptions {
 
 type FileKind = 'main' | 'sub';
 
+interface FileWhere {
+  kind: FileKind;
+  sessionId: string;
+  agentId: string;
+  /** Set on workflow agents. */
+  workflow?: true;
+}
+
 interface FileState {
   path: string;
   kind: FileKind;
@@ -87,6 +99,12 @@ interface FileState {
   spawned: boolean;
   /** Subagent: agent_finish emitted (hand-back seen, or quiet for long). */
   finished: boolean;
+  /** Subagent: the tool call behind the last finish, so a re-read can't finish it again. */
+  finishedBy?: string;
+  /** Subagent: agent_finish events so far (a continued subagent finishes more than once). */
+  finishes: number;
+  /** Subagent: runs inside a workflow (subagents/workflows/<wf>/). */
+  workflow: boolean;
   /** Subagent: tool calls started without a result yet. */
   openUses: Set<string>;
   /** Subagent: parsed agent-<id>.meta.json (loaded before the first spawn). */
@@ -96,10 +114,7 @@ interface FileState {
 }
 
 /** Parsed file location, or null if the path is not a transcript. */
-export function classifyTranscriptPath(
-  root: string,
-  path: string,
-): { kind: FileKind; sessionId: string; agentId: string } | null {
+export function classifyTranscriptPath(root: string, path: string): FileWhere | null {
   if (!path.endsWith('.jsonl')) return null;
   const rel = path.startsWith(root + sep) ? path.slice(root.length + 1) : null;
   if (!rel) return null;
@@ -108,9 +123,12 @@ export function classifyTranscriptPath(
     const sessionId = basename(parts[1]!, '.jsonl');
     return sessionId ? { kind: 'main', sessionId, agentId: ORCHESTRATOR_ID } : null;
   }
-  if (parts.length === 4 && parts[2] === 'subagents' && parts[3]!.startsWith('agent-')) {
-    const agentId = stripAgentPrefix(basename(parts[3]!, '.jsonl'));
-    return agentId && parts[1] ? { kind: 'sub', sessionId: parts[1], agentId } : null;
+  const workflow = parts.length === 6 && parts[3] === 'workflows';
+  const file = parts[parts.length - 1]!;
+  if ((parts.length === 4 || workflow) && parts[2] === 'subagents' && file.startsWith('agent-')) {
+    const agentId = stripAgentPrefix(basename(file, '.jsonl'));
+    if (!agentId || !parts[1]) return null;
+    return { kind: 'sub', sessionId: parts[1], agentId, ...(workflow ? { workflow } : {}) };
   }
   return null;
 }
@@ -250,41 +268,49 @@ export class TranscriptWatcher {
 
   private async listFiles(
     recentSubdirsOnly: number | null,
-  ): Promise<{ path: string; mtimeMs: number }[]> {
-    const out: { path: string; mtimeMs: number }[] = [];
+  ): Promise<{ path: string; mtimeMs: number; size: number }[]> {
+    const out: { path: string; mtimeMs: number; size: number }[] = [];
+    const busy =
+      recentSubdirsOnly === null ? null : this.sessionsWithAgentsSince(recentSubdirsOnly);
     for (const proj of await safeReaddir(this.root)) {
       const projDir = join(this.root, proj);
       const entries = await safeReaddir(projDir);
-      const jsonl = new Set(entries.filter((e) => e.endsWith('.jsonl')));
-      for (const f of jsonl) {
+      const mainMtimes = new Map<string, number>();
+      for (const f of entries) {
+        if (!f.endsWith('.jsonl')) continue;
         const p = join(projDir, f);
         const st = await safeStat(p);
-        if (st && !st.isDir) out.push({ path: p, mtimeMs: st.mtimeMs });
+        if (!st || st.isDir) continue;
+        out.push({ path: p, mtimeMs: st.mtimeMs, size: st.size });
+        mainMtimes.set(basename(f, '.jsonl'), st.mtimeMs);
       }
       for (const sid of entries) {
         if (sid.includes('.')) continue;
-        if (recentSubdirsOnly !== null) {
-          // Rescans: only look inside sessions whose main transcript changed recently.
-          const main = out.find((o) => o.path === join(projDir, `${sid}.jsonl`));
-          if (!main || main.mtimeMs < recentSubdirsOnly) continue;
+        // Rescans: only look inside sessions that changed recently. The main transcript stays
+        // quiet during a long workflow, so a recently written agent file counts too.
+        if (recentSubdirsOnly !== null && !busy?.has(sid)) {
+          const main = mainMtimes.get(sid);
+          if (main === undefined || main < recentSubdirsOnly) continue;
         }
-        const subDir = join(projDir, sid, 'subagents');
-        for (const f of await safeReaddir(subDir)) {
-          if (!f.startsWith('agent-') || !f.endsWith('.jsonl')) continue;
-          const p = join(subDir, f);
-          const st = await safeStat(p);
-          if (st && !st.isDir) out.push({ path: p, mtimeMs: st.mtimeMs });
+        for (const { path } of await agentTranscripts(join(projDir, sid, 'subagents'))) {
+          const st = await safeStat(path);
+          if (st && !st.isDir) out.push({ path, mtimeMs: st.mtimeMs, size: st.size });
         }
       }
     }
     return out;
   }
 
-  private track(
-    path: string,
-    where: { kind: FileKind; sessionId: string; agentId: string },
-    st: FileStat,
-  ): FileState {
+  /** Sessions with a tracked agent transcript modified at or after `since`. */
+  private sessionsWithAgentsSince(since: number): Set<string> {
+    const out = new Set<string>();
+    for (const f of this.files.values()) {
+      if (f.kind === 'sub' && f.mtimeMs >= since) out.add(f.sessionId);
+    }
+    return out;
+  }
+
+  private track(path: string, where: FileWhere, st: FileStat): FileState {
     const state: FileState = {
       path,
       kind: where.kind,
@@ -305,6 +331,8 @@ export class TranscriptWatcher {
       },
       spawned: false,
       finished: false,
+      finishes: 0,
+      workflow: where.workflow === true,
       openUses: new Set(),
       busy: false,
       again: false,
@@ -358,7 +386,12 @@ export class TranscriptWatcher {
     const events: StationEvent[] = [];
     for (const state of this.files.values()) {
       if (state.kind !== 'sub' || !state.spawned || state.finished || state.busy) continue;
-      const quietFor = state.openUses.size > 0 ? QUIET_FINISH_OPEN_TOOL_MS : QUIET_FINISH_MS;
+      const quietFor =
+        state.openUses.size > 0
+          ? QUIET_FINISH_OPEN_TOOL_MS
+          : state.workflow
+            ? WORKFLOW_QUIET_MS
+            : QUIET_FINISH_MS;
       if (now - state.mtimeMs < quietFor) continue;
       const cwd = state.ctx.cwd ?? this.sessionCwd.get(state.sessionId);
       if (!cwd) continue;
@@ -374,8 +407,12 @@ export class TranscriptWatcher {
   }
 
   private finishEvent(state: FileState, cwd: string, ts: number): StationEvent {
+    // The first finish matches the SubagentStop hook's id. A continued subagent finishes again,
+    // and that one needs an id of its own to get past downstream dedupe.
+    const n = state.finishes++;
+    const id = `${state.sessionId}:agent:${state.agentId}:finish`;
     return {
-      id: `${state.sessionId}:agent:${state.agentId}:finish`,
+      id: n === 0 ? id : `${id}:${n}`,
       ts,
       source: 'transcript',
       projectId: projectIdFor(cwd),
@@ -391,13 +428,13 @@ export class TranscriptWatcher {
     if (this.closed) return;
     const now = this.now();
     const cutoff = now - (this.opts.lookbackDays ?? 7) * DAY_MS;
-    const recent = now - DAY_MS;
+    const recent = now - RESCAN_RECENT_MS;
     if (!this.watcher && this.opts.live !== false && this.rescanTimer) this.startWatch();
     for (const f of await this.listFiles(recent)) {
       if (this.closed) return;
       const known = this.files.get(f.path);
       if (known) {
-        if (f.mtimeMs < recent && f.mtimeMs === known.mtimeMs) continue;
+        if (f.mtimeMs === known.mtimeMs && f.size === known.offset) continue;
         await this.readFile(known, 'full', false);
       } else {
         if (f.mtimeMs < cutoff) continue;
@@ -556,7 +593,9 @@ export class TranscriptWatcher {
       }
       start = end + 1;
     }
-    if (state.kind === 'sub' && events.length > 0) this.addSubagentLifecycle(state, events);
+    if (state.kind === 'sub' && events.length > 0) {
+      this.addSubagentLifecycle(state, events, initial);
+    }
     if (events.length === 0 && extras.length === 0) return;
     events.sort((a, b) => a.ts - b.ts);
     try {
@@ -580,8 +619,8 @@ export class TranscriptWatcher {
     }
   }
 
-  /** agent_spawn on first sight (from meta.json), agent_finish on the hand-back tool call. */
-  private addSubagentLifecycle(state: FileState, events: StationEvent[]): void {
+  /** agent_spawn on first sight (from meta.json), agent_finish on the terminal tool call. */
+  private addSubagentLifecycle(state: FileState, events: StationEvent[], initial: boolean): void {
     for (const e of events) {
       const useId = e.tool?.useId;
       if (useId === undefined) continue;
@@ -602,15 +641,24 @@ export class TranscriptWatcher {
         }),
       );
     }
-    if (!state.finished) {
-      const handback = events.find(
-        (e) => e.kind === 'tool_start' && e.tool?.name === HANDBACK_TOOL,
-      );
-      if (handback) {
-        state.finished = true;
-        events.push(this.finishEvent(state, cwd, handback.ts));
+    const finishes: StationEvent[] = [];
+    for (const e of events) {
+      if (e.kind !== 'tool_start') continue;
+      if (!isTerminalTool(e.tool?.name, state.workflow)) {
+        state.finished = false; // back at work: a later hand-back or quiet spell finishes it again
+        continue;
       }
+      const useId = e.tool?.useId ?? e.id;
+      if (state.finished && state.finishedBy === useId) continue;
+      state.finished = true;
+      state.finishedBy = useId;
+      // Line time precedes the hook copies of the same call, whose receive time would beat a
+      // finish stamped with it, and a workflow agent has no SubagentStop to finish it later.
+      // Only for a line written just now: history keeps its own time.
+      const fresh = state.workflow && !initial && this.now() - e.ts < FRESH_LINE_MS;
+      finishes.push(this.finishEvent(state, cwd, fresh ? Math.max(e.ts, this.now()) : e.ts));
     }
+    events.push(...finishes);
   }
 
   private now(): number {

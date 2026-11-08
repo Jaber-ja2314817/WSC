@@ -23,13 +23,27 @@ export function appDir() {
   return dirname(runtimeFilePath());
 }
 
-/** Parsed runtime info, or null if missing/invalid. Never throws. */
+/** True only when the process that wrote the runtime file is certainly gone. */
+function processGone(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return err?.code === 'ESRCH'; // EPERM means it's alive under another user.
+  }
+}
+
+/**
+ * Parsed runtime info, or null if missing/invalid. Also null when the app that wrote it has died:
+ * whatever owns that port now must not receive the token. Never throws.
+ */
 export function readRuntime() {
   try {
     const info = JSON.parse(readFileSync(runtimeFilePath(), 'utf8'));
     if (!Number.isInteger(info.port) || info.port <= 0 || info.port > 65535) return null;
     if (typeof info.token !== 'string' || !info.token) return null;
-    return info;
+    return processGone(info.pid) ? null : info;
   } catch {
     return null;
   }

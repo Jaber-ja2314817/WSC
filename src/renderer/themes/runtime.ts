@@ -54,7 +54,8 @@ export function createGeneratedRuntime(m: ThemeManifest, art: GeneratedArt): The
 
   const prop = (name: string): Texture | null => {
     if (propCache.has(name)) return propCache.get(name) ?? null;
-    const b = art.props[name];
+    // Own keys only: a manifest's `gear` value can name anything, like "constructor".
+    const b = Object.hasOwn(art.props, name) ? art.props[name] : undefined;
     const t = b ? make(b) : null;
     propCache.set(name, t);
     return t;
@@ -149,7 +150,9 @@ export function createSheetRuntime(
     return cache.get(key) ?? null;
   };
   const prop = (name: string): Texture | null =>
-    once(`prop:${name}`, () => (sheet.props[name] ? sub(image, sheet.props[name]) : null));
+    once(`prop:${name}`, () =>
+      Object.hasOwn(sheet.props, name) && sheet.props[name] ? sub(image, sheet.props[name]) : null,
+    );
 
   return {
     ...common(m),

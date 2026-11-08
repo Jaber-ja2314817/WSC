@@ -1,11 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -279,6 +281,20 @@ describe('install-statusline.mjs', () => {
     expect(isWscStatusLine(read(target).statusLine)).toBe(true);
     expect(backups(configDir)).toHaveLength(1);
     expect(existsSync(file)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('keeps a symlinked settings file a symlink', () => {
+    const target = join(dir, 'dotfiles', 'claude-settings.json');
+    mkdirSync(join(dir, 'dotfiles'));
+    writeFileSync(target, '{"model":"opus"}\n');
+    symlinkSync(target, file);
+    expect(cli('install').code).toBe(0);
+    expect(lstatSync(file).isSymbolicLink()).toBe(true);
+    expect(isWscStatusLine(read(target).statusLine)).toBe(true);
+    expect(readdirSync(join(dir, 'dotfiles'))).toEqual(['claude-settings.json']);
+    expect(cli('uninstall').code).toBe(0);
+    expect(lstatSync(file).isSymbolicLink()).toBe(true);
+    expect(read(target).statusLine).toBeUndefined();
   });
 
   it('rejects unknown commands', () => {

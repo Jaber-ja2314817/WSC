@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { findPath } from '../src/shared/astar';
-import { computeLayout, layoutInputFor } from '../src/shared/layout';
+import { SlotBook, computeLayout, layoutInputFor } from '../src/shared/layout';
 import {
   DESK_H,
   DESK_W,
@@ -124,14 +124,29 @@ describe.each(cases)('computeLayout with %i projects × %i agents', (n, agents) 
 });
 
 describe('computeLayout center', () => {
-  it('provides lounge spots, ≥8 report spots and up to 8 table seats', () => {
+  it('provides lounge spots, ≥8 report spots and a seat per session', () => {
     const l = computeLayout({ projects: [], orchestratorSeats: 20, loungeSize: 10 });
-    expect(l.center.tableSeats).toHaveLength(8);
+    expect(l.center.tableSeats).toHaveLength(20);
     expect(l.center.loungeSpots).toHaveLength(10);
     expect(l.center.reportSpots.length).toBeGreaterThanOrEqual(8);
     expect(
       computeLayout({ projects: [], orchestratorSeats: 0, loungeSize: 2 }).center.loungeSpots,
     ).toHaveLength(6);
+  });
+
+  it('gives every seat its own free tile, past the 8 chairs at the table', () => {
+    const l = computeLayout({ projects: [], orchestratorSeats: 500, loungeSize: 24 });
+    const seats = l.center.tableSeats;
+    expect(seats.length).toBeGreaterThanOrEqual(50);
+    const key = (t: { x: number; y: number }): string => `${t.x},${t.y}`;
+    expect(new Set(seats.map((s) => key(s.tile))).size).toBe(seats.length);
+    const taken = new Set(
+      [...l.center.reportSpots, ...l.center.loungeSpots].map((s) => key(s.tile)),
+    );
+    for (const s of seats) {
+      expect(taken.has(key(s.tile)), key(s.tile)).toBe(false);
+      expect(l.walkable[s.tile.y * l.width + s.tile.x], key(s.tile)).toBe(true);
+    }
   });
 
   it('keeps seat i in place as the table grows', () => {
@@ -191,6 +206,67 @@ describe('computeLayout stability', () => {
   });
 });
 
+describe('stable placement', () => {
+  const rel = (l: StationLayout, id: string): { x: number; y: number } => {
+    const z = l.zones.find((q) => q.projectId === id)!;
+    return { x: z.rect.x - l.center.rect.x, y: z.rect.y - l.center.rect.y };
+  };
+
+  it('leaves other zones where they are when a project goes', () => {
+    const book = new SlotBook();
+    const all = projects(3);
+    const before = computeLayout(book.assign({ ...input(3), projects: all }));
+    const after = computeLayout(book.assign({ ...input(3), projects: all.slice(1) }));
+    expect(after.zones.map((z) => z.slot)).toEqual([1, 2]);
+    expect(rel(after, 'p1')).toEqual(rel(before, 'p1'));
+    expect(rel(after, 'p2')).toEqual(rel(before, 'p2'));
+  });
+
+  it('gives a new project the freed slot and nothing else moves', () => {
+    const book = new SlotBook();
+    const all = projects(4);
+    book.assign({ ...input(3), projects: all.slice(0, 3) });
+    book.assign({ ...input(3), projects: [all[1]!, all[2]!] });
+    const next = book.assign({ ...input(3), projects: [all[1]!, all[2]!, all[3]!] });
+    expect(next.projects.map((p) => [p.id, p.slot])).toEqual([
+      ['p1', 1],
+      ['p2', 2],
+      ['p3', 0],
+    ]);
+  });
+
+  it('keeps every project in its slot when the input repeats', () => {
+    const book = new SlotBook();
+    const first = book.assign(input(5));
+    expect(book.assign(input(5))).toEqual(first);
+  });
+
+  it('places zones by project order when no slots are given', () => {
+    const l = computeLayout(input(3));
+    expect(l.zones.map((z) => z.slot)).toEqual([0, 1, 2]);
+  });
+
+  it('keeps desk ids on the same tiles when a zone adds a row', () => {
+    for (let slot = 0; slot < 8; slot++) {
+      const count = (agents: number): StationLayout => {
+        const ps = projects(8).map((p, i) => ({ ...p, agentCount: i === slot ? agents : 0 }));
+        return computeLayout({ ...input(8), projects: ps });
+      };
+      const seat = (l: StationLayout): Map<string, string> => {
+        const c = l.center.rect;
+        const z = l.zones[slot]!;
+        return new Map(z.desks.map((d) => [d.id, `${d.seat.tile.x - c.x},${d.seat.tile.y - c.y}`]));
+      };
+      const small = seat(count(4));
+      const big = seat(count(8));
+      const kept = [...small].filter(([id]) => big.has(id));
+      for (const [id, tile] of kept) expect(big.get(id)).toBe(tile);
+      // North/south rooms grow outward, so nobody has to move at all.
+      if (slot === 0 || slot === 2) expect(kept).toHaveLength(small.size);
+    }
+  });
+});
+
 describe('layoutInputFor', () => {
   const deskCount = (store: StationStore): number =>
     computeLayout(layoutInputFor(store.snapshot(), 6)).zones[0]!.desks.length;
@@ -213,12 +289,37 @@ describe('layoutInputFor', () => {
     resetSeq();
     const store = new StationStore();
     store.apply(ev({ kind: 'session_start' }));
-    for (const id of ['a1', 'a2', 'a3']) store.apply(ev({ kind: 'agent_spawn', agentId: id }));
+    for (let i = 0; i < 6; i++) store.apply(ev({ kind: 'agent_spawn', agentId: `a${i}` }));
+    store.apply(ev({ kind: 'agent_finish', agentId: 'a0' }));
     store.apply(ev({ kind: 'agent_finish', agentId: 'a1' }));
-    store.apply(ev({ kind: 'agent_error', agentId: 'a2' }));
+    // Four left, so the room fits in one row. An errored agent still counts as crew.
     const input = layoutInputFor(store.snapshot(), 6);
-    expect(input.projects).toEqual([{ id: 'proj-a', name: 'project-a', order: 0, agentCount: 2 }]);
+    expect(input.projects).toEqual([{ id: 'proj-a', name: 'project-a', order: 0, agentCount: 4 }]);
     expect(input.orchestratorSeats).toBe(1);
+    store.apply(ev({ kind: 'agent_spawn', agentId: 'a6' }));
+    store.apply(ev({ kind: 'agent_error', agentId: 'a6' }));
+    expect(layoutInputFor(store.snapshot(), 6).projects[0]!.agentCount).toBe(8);
+  });
+
+  it('does not change when a spawn fits the desks the room already has', () => {
+    resetSeq();
+    const store = new StationStore();
+    store.apply(ev({ kind: 'session_start' }));
+    const key = (): string => JSON.stringify(layoutInputFor(store.snapshot(), 6));
+    const before = key();
+    for (let i = 0; i < 4; i++) store.apply(ev({ kind: 'agent_spawn', agentId: `a${i}` }));
+    expect(key()).toBe(before);
+    store.apply(ev({ kind: 'agent_spawn', agentId: 'a4' }));
+    expect(key()).not.toBe(before);
+  });
+
+  it('keeps a seat at the table for a session that has ended but not left yet', () => {
+    resetSeq();
+    const store = new StationStore();
+    store.apply(ev({ kind: 'session_start', sessionId: 'sess-1' }));
+    store.apply(ev({ kind: 'session_start', sessionId: 'sess-2' }));
+    store.apply(ev({ kind: 'session_end', sessionId: 'sess-1' }));
+    expect(layoutInputFor(store.snapshot(), 6).orchestratorSeats).toBe(2);
   });
 
   it('adds space only once every seat is taken', () => {

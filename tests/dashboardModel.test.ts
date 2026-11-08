@@ -27,6 +27,7 @@ import {
   barFill,
   formatResetAt,
   planRows,
+  hourLabel,
 } from '../src/renderer/panels/dashboardModel';
 
 const HOUR = 3_600_000;
@@ -243,6 +244,28 @@ describe('hourly chart stacking', () => {
     expect(segmentHeights([5], 0, 96)).toEqual([0]);
     // A tiny bar still shows one pixel.
     expect(segmentHeights([1], 1_000_000, 96)).toEqual([1]);
+  });
+});
+
+describe('hourLabel', () => {
+  const withTz = (tz: string, fn: () => void): void => {
+    const prev = process.env['TZ'];
+    process.env['TZ'] = tz;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env['TZ'];
+      else process.env['TZ'] = prev;
+    }
+  };
+  const UTC_HOUR = Date.UTC(2026, 0, 15, 9);
+
+  it('reads as an hour in a whole-hour zone', () => {
+    withTz('Asia/Riyadh', () => expect(hourLabel(UTC_HOUR)).toBe('12h'));
+  });
+
+  it('shows the minutes in a half-hour zone, so the bar matches the local clock', () => {
+    withTz('Asia/Kolkata', () => expect(hourLabel(UTC_HOUR)).toBe('14:30'));
   });
 });
 

@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readdir, rm, stat, utimes } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -178,6 +178,114 @@ describe('backfillTranscript', () => {
     });
     // Tail holds only the last records; no throw on the cut line.
     expect(events.every((e) => e.sessionId === SA)).toBe(true);
+  });
+});
+
+describe('backfill of workflow agents', () => {
+  const wfDir = (): string => join(root, DIR_A, SA, 'subagents', 'workflows', 'wf_0001');
+  const line = (ts: number, name: string, useId: string): string =>
+    JSON.stringify({
+      type: 'assistant',
+      uuid: `u-${useId}`,
+      timestamp: new Date(ts).toISOString(),
+      sessionId: SA,
+      agentId: 'wf01',
+      isSidechain: true,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: useId, name, input: {} }],
+      },
+    });
+  const result = (ts: number, useId: string): string =>
+    JSON.stringify({
+      type: 'user',
+      uuid: `r-${useId}`,
+      timestamp: new Date(ts).toISOString(),
+      sessionId: SA,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: useId }] },
+    });
+  const write = async (lines: string[], mtime: number): Promise<void> => {
+    await mkdir(wfDir(), { recursive: true });
+    const file = join(wfDir(), 'agent-wf01.jsonl');
+    await writeFile(file, `${lines.join('\n')}\n`);
+    await touch(file, mtime);
+  };
+  const finished = (events: StationEvent[]): boolean =>
+    events.some((e) => e.id === `${SA}:agent:wf01:finish`);
+
+  it('reads them, with the label from the meta file beside them', async () => {
+    await write([line(NOW - MIN, 'Bash', 'toolu_w1')], NOW - MIN);
+    await writeFile(join(wfDir(), 'journal.jsonl'), '{"type":"started"}\n');
+    await writeFile(join(wfDir(), 'agent-wf01.meta.json'), '{"agentType":"reviewer"}');
+    const { events, result: r } = await collect();
+    expect(r.agents).toBeGreaterThanOrEqual(1);
+    expect(events.find((e) => e.id === `${SA}:agent:wf01:spawn`)?.label).toBe('reviewer');
+    expect(events.some((e) => e.agentId === 'wf01' && e.kind === 'tool_start')).toBe(true);
+    expect(finished(events)).toBe(false);
+  });
+
+  it('counts a session as recent when only a workflow agent changed', async () => {
+    await touchAll(join(root, DIR_A), NOW - 120 * MIN);
+    await write([line(NOW - MIN, 'Bash', 'toolu_w1')], NOW - MIN);
+    const { events } = await collect();
+    expect(events.some((e) => e.agentId === 'wf01')).toBe(true);
+  });
+
+  it('finishes one on its StructuredOutput call', async () => {
+    await write([line(NOW - MIN, 'StructuredOutput', 'toolu_w1')], NOW - MIN);
+    expect(finished((await collect()).events)).toBe(true);
+  });
+
+  it('finishes one that has been quiet for a few minutes with no open tool call', async () => {
+    const lines = [line(NOW - 5 * MIN, 'Read', 'toolu_w1'), result(NOW - 5 * MIN, 'toolu_w1')];
+    await write(lines, NOW - 4 * MIN);
+    expect(finished((await collect()).events)).toBe(true);
+    await write(lines.slice(0, 1), NOW - 4 * MIN);
+    expect(finished((await collect()).events)).toBe(false);
+  });
+});
+
+describe('backfill of continued subagents and moved sessions', () => {
+  it('does not finish a subagent that went back to work after handing back', async () => {
+    const dir = join(root, DIR_A, SA, 'subagents');
+    const tool = (ts: number, name: string, useId: string): string =>
+      JSON.stringify({
+        type: 'assistant',
+        uuid: `u-${useId}`,
+        timestamp: new Date(ts).toISOString(),
+        sessionId: SA,
+        message: { role: 'assistant', content: [{ type: 'tool_use', id: useId, name, input: {} }] },
+      });
+    const file = join(dir, 'agent-cont1.jsonl');
+    await writeFile(
+      file,
+      `${tool(NOW - 3 * MIN, 'SubagentHandback', 'toolu_h')}\n${tool(NOW - MIN, 'Read', 'toolu_r')}\n`,
+    );
+    await touch(file, NOW - MIN);
+    const { events } = await collect();
+    expect(events.some((e) => e.id === `${SA}:agent:cont1:finish`)).toBe(false);
+  });
+
+  it('takes the cwd from the head of a transcript too long to read whole', async () => {
+    const file = join(root, DIR_A, `${SB}.jsonl`);
+    const rec = (cwd: string, i: number): string =>
+      JSON.stringify({
+        type: 'system',
+        cwd,
+        timestamp: new Date(NOW - MIN).toISOString(),
+        uuid: `u${i}`,
+      });
+    await writeFile(
+      file,
+      `${rec('/home/user/repo', 0)}\n${rec('/home/user/repo/sub', 1)}\n${rec('/home/user/repo/sub', 2)}\n`,
+    );
+    const events: StationEvent[] = [];
+    await backfillTranscript(file, {
+      now: NOW,
+      maxBytesPerFile: 200,
+      onEvents: (e) => events.push(...e),
+    });
+    expect(events[0]?.projectId).toBe(projectIdFor('/home/user/repo'));
   });
 });
 

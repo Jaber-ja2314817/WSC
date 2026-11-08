@@ -41,7 +41,7 @@ export interface Decor {
 export interface ZoneLayout {
   projectId: string;
   name: string;
-  /** Stable placement slot (project creation order). */
+  /** Stable placement slot: kept for the zone's life, reused only once it is free. */
   slot: number;
   rect: Rect;
   nameplate: TilePos;
@@ -55,7 +55,7 @@ export interface CenterLayout {
   rect: Rect;
   /** Central command table prop footprint. */
   table: Rect;
-  /** One per orchestrator (session), around the table. */
+  /** One per orchestrator (session): chairs at the table first, then standing room around it. */
   tableSeats: Spot[];
   /** Where crew stand to report to the orchestrators, facing the table. */
   reportSpots: Spot[];
@@ -79,9 +79,12 @@ export interface StationLayout {
 }
 
 export interface LayoutInput {
-  /** Projects in stable order (ProjectState.order ascending). */
-  projects: { id: string; name: string; order: number; agentCount: number }[];
-  /** Number of orchestrator seats needed (active sessions), min 1. */
+  /**
+   * Projects in stable order (ProjectState.order ascending). `slot` comes from a SlotBook;
+   * without one, zones take consecutive slots in project order.
+   */
+  projects: { id: string; name: string; order: number; agentCount: number; slot?: number }[];
+  /** Number of orchestrator seats needed (every session on the station), min 1. */
   orchestratorSeats: number;
   /** Lounge pool size (settings, default 6). */
   loungeSize: number;

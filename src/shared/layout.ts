@@ -24,9 +24,15 @@ const TABLE_Y = 3;
 const TABLE_H = 3;
 const TABLE_MAX_W = 10;
 const TABLE_X = Math.floor((CENTER_W - TABLE_MAX_W) / 2); // 6
-const MAX_SEATS = 8;
 /** Seat x offsets from TABLE_X per side, central first, so seats never move as the table grows. */
 const SEAT_OFFSETS = [4, 6, 2, 8];
+const TABLE_CHAIRS = SEAT_OFFSETS.length * 2;
+/** Top and bottom rows of the center, edge to edge bar the corners, central tiles first. */
+const GALLERY_X = Array.from({ length: CENTER_W - 4 }, (_, i) => i + 2).sort(
+  (a, b) => Math.abs(2 * a - CENTER_W + 1) - Math.abs(2 * b - CENTER_W + 1) || a - b,
+);
+/** Past this many sessions orchestrators share tiles: the center has no more standing room. */
+const MAX_SEATS = TABLE_CHAIRS * 2 + GALLERY_X.length * 2;
 const LOUNGE_Y = 9;
 const LOUNGE_PER_ROW = 8;
 
@@ -71,6 +77,31 @@ const spot = (id: string, x: number, y: number, facing: Dir): Spot => ({
   facing,
 });
 
+/** Crew are given desks in whole rows of four, and a zone always has at least one row. */
+const deskTier = (agents: number): number =>
+  Math.max(DESKS_PER_ROW, Math.ceil(Math.max(0, agents || 0) / DESKS_PER_ROW) * DESKS_PER_ROW);
+
+/**
+ * Where orchestrator `i` sits. Up to 8 take chairs at the table; the rest stand around it, on the
+ * even tiles between the report spots and then along the room's top and bottom rows.
+ */
+function seatSpot(i: number): Spot {
+  const top = i % 2 === 0;
+  const facing: Dir = top ? 'down' : 'up';
+  const side = Math.floor(i / 2);
+  const chairs = SEAT_OFFSETS.length;
+  if (side < chairs) {
+    const y = top ? TABLE_Y - 1 : TABLE_Y + TABLE_H;
+    return spot(`seat:${i}`, TABLE_X + SEAT_OFFSETS[side]!, y, facing);
+  }
+  if (side < chairs * 2) {
+    const y = top ? TABLE_Y - 2 : TABLE_Y + TABLE_H + 1;
+    return spot(`seat:${i}`, TABLE_X + SEAT_OFFSETS[side - chairs]!, y, facing);
+  }
+  const y = top ? TABLE_Y - 3 : TABLE_Y + TABLE_H + 2;
+  return spot(`seat:${i}`, GALLERY_X[side - chairs * 2]!, y, facing);
+}
+
 function buildCenter(
   orchestratorSeats: number,
   loungeSize: number,
@@ -84,14 +115,7 @@ function buildCenter(
     h: TABLE_H,
   };
 
-  const tableSeats: Spot[] = [];
-  for (let i = 0; i < seats; i++) {
-    const top = i % 2 === 0;
-    const x = TABLE_X + SEAT_OFFSETS[Math.floor(i / 2)]!;
-    tableSeats.push(
-      spot(`seat:${i}`, x, top ? TABLE_Y - 1 : TABLE_Y + TABLE_H, top ? 'down' : 'up'),
-    );
-  }
+  const tableSeats = Array.from({ length: seats }, (_, i) => seatSpot(i));
 
   const below = TABLE_Y + TABLE_H + 1; // 7
   const above = TABLE_Y - 2; // 1
@@ -181,7 +205,7 @@ function buildZone(
   slot: number,
   centerRect: Rect,
 ): WorldZone {
-  const desksN = Math.max(4, Math.ceil(Math.max(0, p.agentCount || 0) / 4) * 4);
+  const desksN = deskTier(p.agentCount);
   const { fp, dx, dy } = footprint(slot, centerRect);
   // Up to 16 desks: 4 per row. Beyond that, grow outward: E/W zones add columns, others rows.
   const sideways = dy === 0 && desksN > FOOTPRINT_DESKS;
@@ -217,14 +241,15 @@ function buildZone(
       });
     }
   }
-  // Fill desks nearest the door first (stable tie-break by grid order).
+  // Fill desks nearest the door first (stable tie-break by grid order). That order changes as the
+  // room grows, so ids come from the desk's place in the footprint: seated crew keep their desk.
   const dist = (d: DeskSlot): number =>
     Math.abs(d.seat.tile.x - door.x) + Math.abs(d.seat.tile.y - door.y);
   const ordered = desks
     .map((d, i) => ({ d, i }))
     .sort((a, b) => dist(a.d) - dist(b.d) || a.i - b.i)
-    .map(({ d }, i) => {
-      const id = `${p.id}:desk:${i}`;
+    .map(({ d }) => {
+      const id = `${p.id}:desk:${d.desk.x - fp.x}:${d.desk.y - fp.y}`;
       return { id, desk: d.desk, seat: { ...d.seat, id: `${id}:seat` } };
     });
 
@@ -272,9 +297,11 @@ const zoneBox = (z: ZoneLayout): Rect => ({
 });
 
 /**
- * Only the facts that change the layout; anything else must not trigger a rebuild.
+ * Only the facts that change the layout; anything else must not trigger a rebuild, so
+ * `agentCount` is rounded up to the zone's desk tier and a spawn inside a tier changes nothing.
  * A zone counts only crew that still need a seat: finished agents stay in the snapshot but have
  * left their desks, so they never add space while free seats remain.
+ * The table counts every session in the snapshot, because ended ones linger at it for a while.
  */
 export function layoutInputFor(snap: StationSnapshot, loungeSize: number): LayoutInput {
   const agentCount = new Map<string, number>();
@@ -288,10 +315,41 @@ export function layoutInputFor(snap: StationSnapshot, loungeSize: number): Layou
       id: p.id,
       name: p.name,
       order: p.order,
-      agentCount: agentCount.get(p.id) ?? 0,
+      agentCount: deskTier(agentCount.get(p.id) ?? 0),
     }));
-  const active = Object.values(snap.sessions).filter((s) => s.endedAt === undefined).length;
-  return { projects, orchestratorSeats: Math.max(1, active), loungeSize };
+  return {
+    projects,
+    orchestratorSeats: Math.max(1, Object.keys(snap.sessions).length),
+    loungeSize,
+  };
+}
+
+/**
+ * Remembers which slot each project's zone holds, so removing a project moves nothing else.
+ * Layout is otherwise pure: this is the one piece of state, and the caller keeps it.
+ */
+export class SlotBook {
+  private readonly slots = new Map<string, number>();
+
+  assign(input: LayoutInput): LayoutInput {
+    const ids = new Set(input.projects.map((p) => p.id));
+    for (const id of this.slots.keys()) if (!ids.has(id)) this.slots.delete(id);
+    const taken = new Set(this.slots.values());
+    let free = 0;
+    const projects = [...input.projects]
+      .sort((a, b) => a.order - b.order || (a.id < b.id ? -1 : 1))
+      .map((p) => {
+        let slot = this.slots.get(p.id);
+        if (slot === undefined) {
+          while (taken.has(free)) free++;
+          slot = free;
+          taken.add(slot);
+          this.slots.set(p.id, slot);
+        }
+        return { ...p, slot };
+      });
+    return { ...input, projects };
+  }
 }
 
 export function computeLayout(input: LayoutInput): StationLayout {
@@ -299,10 +357,13 @@ export function computeLayout(input: LayoutInput): StationLayout {
   // World coords: center rect at the origin; translated at the end.
   const centerRect: Rect = { x: -Math.floor(cw / 2), y: -Math.floor(ch / 2), w: cw, h: ch };
 
-  const projects = [...input.projects].sort((a, b) => a.order - b.order || (a.id < b.id ? -1 : 1));
+  const projects = [...input.projects]
+    .sort((a, b) => a.order - b.order || (a.id < b.id ? -1 : 1))
+    .map((p, i) => ({ ...p, slot: p.slot ?? i }))
+    .sort((a, b) => a.slot - b.slot);
   const placed: WorldZone[] = [];
-  projects.forEach((p, slot) => {
-    const wz = buildZone(p, slot, centerRect);
+  projects.forEach((p) => {
+    const wz = buildZone(p, p.slot, centerRect);
     // Earlier slots win; a grown zone pushes later ones outward (never the reverse).
     const blockers = [centerRect, ...placed.map((q) => zoneBox(q.zone))];
     let guard = 0;

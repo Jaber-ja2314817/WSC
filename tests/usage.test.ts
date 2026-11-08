@@ -57,7 +57,7 @@ describe('UsageBook', () => {
     const b = rec(T0 + H, 20);
     const book = new UsageBook();
     expect(book.add([a, b])).toBe(true);
-    expect(book.add([{ ...a }, { ...b, usage: u(999) }])).toBe(false);
+    expect(book.add([{ ...a }, { ...b, usage: u(5) }])).toBe(false);
     expect(book.size).toBe(2);
     expect(book.records().map((r) => r.ts)).toEqual([T0 + H, T0 + 2 * H]);
     expect(book.sessionUsage('sess-1')).toEqual(u(30));
@@ -89,6 +89,48 @@ describe('UsageBook', () => {
     });
     expect(book.prune(T0 + 3 * H)).toBe(2);
     expect(book.sessionByModel('sess-1')).toEqual({});
+  });
+});
+
+describe('UsageBook — streamed repeats', () => {
+  const key = 'msg_fake_stream:req_fake';
+
+  it('keeps the per-field maximum of a repeated message and never double counts', () => {
+    const book = bookOf(rec(T0, 0, { key, usage: u(3, 1, 7, 9) }));
+    expect(book.add([rec(T0 + 1, 0, { key, usage: u(3, 500, 7, 9) })])).toBe(true);
+    expect(book.add([rec(T0 + 2, 0, { key, usage: u(2, 400, 7, 9) })])).toBe(false);
+    expect(book.size).toBe(1);
+    expect(book.records()[0]?.usage).toEqual(u(3, 500, 7, 9));
+    expect(book.sessionUsage('sess-1')).toEqual(u(3, 500, 7, 9));
+    expect(book.sessionByModel('sess-1')).toEqual({ 'claude-fake-1': u(3, 500, 7, 9) });
+  });
+
+  it('ignores a repeat with non-numeric fields', () => {
+    const book = bookOf(rec(T0, 0, { key, usage: u(3, 1) }));
+    const bad = { ...u(3, 1), output: Number.NaN };
+    expect(book.add([rec(T0, 0, { key, usage: bad })])).toBe(false);
+    expect(book.sessionUsage('sess-1')).toEqual(u(3, 1));
+  });
+
+  it('moves the grown total when the same repeat also moves the credit', () => {
+    const book = bookOf(rec(T0, 0, { key, sessionId: 'resumed', rank: 2, usage: u(0, 1) }));
+    book.add([rec(T0, 0, { key, sessionId: 'orig', rank: 1, usage: u(0, 500) })]);
+    expect(book.sessionUsage('orig')).toEqual(u(0, 500));
+    expect(book.sessionUsage('resumed')).toEqual(u(0));
+  });
+});
+
+describe('UsageBook — totals of kept sessions', () => {
+  it('keeps totals for sessions the caller keeps, until the session is dropped', () => {
+    const book = bookOf(
+      rec(T0, 5, { sessionId: 'live' }),
+      rec(T0 + 2 * H, 7, { sessionId: 'live' }),
+    );
+    expect(book.prune(T0 + H, (id) => id === 'live')).toBe(1);
+    expect(book.size).toBe(1);
+    expect(book.sessionUsage('live')).toEqual(u(12));
+    book.dropSession('live');
+    expect(book.sessionUsage('live')).toEqual(u(0));
   });
 });
 
@@ -305,6 +347,28 @@ describe('mergePlanLimits', () => {
     const prev = { updatedAt: T + 50, fiveHour: w(30, T + 1000) };
     const late = { updatedAt: T, fiveHour: w(5, T + 1000) };
     expect(mergePlanLimits(prev, late, T + 60)).toBe(prev);
+  });
+
+  it('keeps the higher usage of one window: an idle session reports old numbers', () => {
+    const prev = { updatedAt: T, fiveHour: w(55, T + 1000), sevenDay: w(20, T + 9000) };
+    const idle = { updatedAt: T + 10, fiveHour: w(40, T + 1000), sevenDay: w(21, T + 9000) };
+    expect(mergePlanLimits(prev, idle, T + 10)).toEqual({
+      updatedAt: T + 10,
+      fiveHour: w(55, T + 1000),
+      sevenDay: w(21, T + 9000),
+    });
+  });
+
+  it('ignores a window that resets earlier than the known one', () => {
+    const prev = { updatedAt: T, fiveHour: w(3, T + 18_000) };
+    const stale = { updatedAt: T + 10, fiveHour: w(90, T - 1000) };
+    expect(mergePlanLimits(prev, stale, T + 10).fiveHour).toEqual(w(3, T + 18_000));
+  });
+
+  it('a later reset is a new window, even with lower usage', () => {
+    const prev = { updatedAt: T, fiveHour: w(90, T + 1000) };
+    const fresh = { updatedAt: T + 10, fiveHour: w(2, T + 18_000) };
+    expect(mergePlanLimits(prev, fresh, T + 2000).fiveHour).toEqual(w(2, T + 18_000));
   });
 
   it('starts from nothing', () => {

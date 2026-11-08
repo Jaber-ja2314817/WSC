@@ -457,9 +457,12 @@ export function segmentHeights(values: readonly number[], max: number, height: n
   return out;
 }
 
-/** Hour label for the chart axis: "14h". */
+/** Bucket start for the chart axis: "14h", or "14:30" where the local offset isn't whole hours. */
 export function hourLabel(ts: number): string {
-  return `${String(new Date(ts).getHours()).padStart(2, '0')}h`;
+  const d = new Date(ts);
+  const hour = String(d.getHours()).padStart(2, '0');
+  const min = d.getMinutes();
+  return min === 0 ? `${hour}h` : `${hour}:${String(min).padStart(2, '0')}`;
 }
 
 /** Subagent chips shown on a session card before folding the rest into "+N". */

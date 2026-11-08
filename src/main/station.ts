@@ -31,10 +31,24 @@ const DAY_MS = 24 * 60 * 60_000;
 /** Live transcript events older than this only reach the dashboard, never the station floor. */
 const LIVE_STORE_HORIZON_MS = 30 * 60_000;
 const TIMELINE_LIMIT = 300;
+/** The dashboard's weekly total needs this much, whatever the startup scan's horizon. */
+const MIN_RETENTION_MS = 7 * DAY_MS;
+/** The demo loops with fresh ids forever, and nothing needs its history. */
+const DEMO_RETENTION_MS = 60 * 60_000;
+/**
+ * What ends an unpinned demo. Not `idle` or `tool_end`: `/station demo` runs inside a turn, so
+ * that turn's own wrap-up would end the demo it just started.
+ */
+const REAL_WORK = new Set<StationEvent['kind']>([
+  'session_start',
+  'user_prompt',
+  'tool_start',
+  'agent_spawn',
+]);
 
 /**
  * - `live`: real hook events + transcript backfill.
- * - `demo`: scripted run; the first real hook event switches back to live (first-run button,
+ * - `demo`: scripted run; the first sign of real work switches back to live (first-run button,
  *   `/station demo`).
  * - `demo-pinned`: scripted run that ignores hooks (`--demo`, for development and recordings).
  */
@@ -110,6 +124,10 @@ export class Station {
   private lastDashAt = 0;
   private lastDashJson = '';
   private scanDone: Promise<void> = Promise.resolve();
+  /** The startup scan labels every line as history; lines newer than this are live. */
+  private scanStartedAt = 0;
+  /** Sessions being backfilled → their hook events, held so backfill sets the zone first. */
+  private readonly backfilling = new Map<string, StationEvent[]>();
   /** Real plan usage from the status line bridge. */
   private planLimits: PlanLimits | undefined;
   private demoStartedAt = Date.now();
@@ -230,6 +248,12 @@ export class Station {
   ingest(evs: StationEvent[]): void {
     this.store.applyMany(evs);
     if (this.ledger.applyEvents(evs)) this.dashDirty = true;
+  }
+
+  /** Real events that arrived asynchronously: during a demo, keep them off the demo's floor. */
+  private ingestReal(evs: StationEvent[]): void {
+    if (this.currentMode === 'live') this.ingest(evs);
+    else if (this.ledger.applyEvents(evs)) this.dashDirty = true;
   }
 
   /** A raw hook payload passed on the command line (`--hook-payload=`) at launch. */
@@ -357,6 +381,7 @@ export class Station {
 
   private startWatcher(): void {
     if (this.watcher) return;
+    this.scanStartedAt = Date.now();
     this.watcher = new TranscriptWatcher({
       ...(this.opts.projectsDir !== undefined ? { root: this.opts.projectsDir } : {}),
       ...(this.opts.liveWatch === false ? { live: false } : {}),
@@ -378,10 +403,11 @@ export class Station {
       changed = true;
     }
     if (changed) this.dashDirty = true;
-    // The startup scan only feeds the dashboard; backfill seeds the station floor. Live lines
-    // also reach the floor (sessions without hooks still show up), but never old history.
-    if (b.initial || this.currentMode !== 'live' || b.events.length === 0) return;
-    const horizon = Date.now() - LIVE_STORE_HORIZON_MS;
+    // History from the startup scan only feeds the dashboard; backfill seeds the station floor.
+    // Live lines also reach the floor (sessions without hooks still show up), including lines
+    // written during the scan, which backfill may have missed. Old history never does.
+    if (this.currentMode !== 'live' || b.events.length === 0) return;
+    const horizon = b.initial ? this.scanStartedAt : Date.now() - LIVE_STORE_HORIZON_MS;
     const recent = b.events.filter((e) => e.ts >= horizon);
     if (recent.length > 0) this.store.applyMany(recent);
   }
@@ -420,15 +446,16 @@ export class Station {
 
   private pruneLedger(): void {
     const days = this.tuning.lookbackDays ?? 7;
-    this.ledger.prune(Date.now(), days * DAY_MS);
-    this.demoLedger.prune(Date.now(), days * DAY_MS);
+    this.ledger.prune(Date.now(), Math.max(days * DAY_MS, MIN_RETENTION_MS));
+    this.demoLedger.prune(Date.now(), DEMO_RETENTION_MS);
   }
 
   private backfill(): void {
     // Tick right away so long-silent backfilled agents show as stale/done immediately.
-    void backfillRecent({ ...this.normalizeOpts(), onEvents: (evs) => this.ingest(evs) }).then(() =>
-      this.store.tick(Date.now()),
-    );
+    void backfillRecent({
+      ...this.normalizeOpts(),
+      onEvents: (evs) => this.ingestReal(evs),
+    }).then(() => this.store.tick(Date.now()));
   }
 
   private resetStore(): void {
@@ -457,18 +484,37 @@ export class Station {
       this.sawHookEvent = true;
       this.opts.onFirstHookEvent?.();
     }
-    // Real work started while the demo was playing: show reality instead.
-    if (this.currentMode === 'demo') this.stopDemo();
+    if (this.currentMode === 'demo') {
+      // Real work started while the demo was playing: show reality instead.
+      if (!events.some((e) => REAL_WORK.has(e.kind))) {
+        this.ingestReal(events);
+        return;
+      }
+      this.stopDemo();
+    }
 
     const info = hookSessionInfo(raw);
+    const held = info && this.backfilling.get(info.sessionId);
+    if (held) {
+      held.push(...events);
+      return;
+    }
     // First sight of a session that started before the app: reconstruct it from its transcript.
     if (info && !this.seenSessions.has(info.sessionId)) {
       this.seenSessions.add(info.sessionId);
       if (info.transcriptPath) {
+        // Hook events wait: the session must land in the zone it started in, and this hook's
+        // cwd is wherever a `cd` left it.
+        const queue = [...events];
+        this.backfilling.set(info.sessionId, queue);
         void backfillTranscript(info.transcriptPath, {
           ...this.normalizeOpts(),
-          onEvents: (evs) => this.ingest(evs),
+          onEvents: (evs) => this.ingestReal(evs),
+        }).then(() => {
+          this.backfilling.delete(info.sessionId);
+          this.ingestReal(queue);
         });
+        return;
       }
     }
     this.ingest(events);

@@ -3,6 +3,7 @@
 // Prints exactly one short line for Claude Code to relay, and always exits 0.
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import http from 'node:http';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,15 +36,44 @@ export function parseArgs(argv) {
   return { error: 'WSC: usage: /station [compact | theme <name> | demo | status]' };
 }
 
-async function request(runtime, method, path, body, timeoutMs) {
-  const res = await fetch(`http://127.0.0.1:${runtime.port}${path}`, {
-    method,
-    headers: { 'x-wsc-token': runtime.token, 'content-type': 'application/json' },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-    signal: AbortSignal.timeout(timeoutMs),
+/** node:http with `agent: false`, never fetch: fetch can follow NODE_USE_ENV_PROXY. */
+function request(runtime, method, path, body, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const data = body ? Buffer.from(JSON.stringify(body)) : undefined;
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: runtime.port,
+        path,
+        method,
+        agent: false,
+        headers: {
+          'x-wsc-token': runtime.token,
+          'content-type': 'application/json',
+          ...(data ? { 'content-length': data.length } : {}),
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('error', reject);
+        res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) return reject(new Error(`HTTP ${status}`));
+          if (status === 204) return resolve({});
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      },
+    );
+    const timer = setTimeout(() => req.destroy(new Error('timeout')), timeoutMs);
+    req.on('close', () => clearTimeout(timer));
+    req.on('error', reject);
+    req.end(data);
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.status === 204 ? {} : res.json();
 }
 
 function successLine(cmd, result) {
@@ -66,7 +96,8 @@ function successLine(cmd, result) {
 }
 
 function startArgs(cmd) {
-  if (cmd.action === 'demo') return ['--demo'];
+  // Not --demo: that mode is pinned for `npm run demo` and ignores real sessions.
+  if (cmd.action === 'demo') return ['--play-demo'];
   if (cmd.action === 'compact') return ['--compact'];
   if (cmd.action === 'theme') return [`--theme=${cmd.arg}`];
   return [];
@@ -89,6 +120,18 @@ function onPath(name) {
 }
 
 /**
+ * cmd.exe gets a shell spawn's arguments unquoted, so anything with spaces is quoted here. It is
+ * one string because Node 24+ prints a deprecation warning to stderr for shell plus an args array.
+ */
+const cmdQuote = (s) => (/^[\w.:=\\/-]+$/.test(s) ? s : `"${s}"`);
+
+const viaCmd = (command, args) => ({
+  command: [command, ...args].map(cmdQuote).join(' '),
+  args: [],
+  shell: true,
+});
+
+/**
  * How to start the app: { command, args, shell? } or null when it can't be found.
  * Order: WSC_APP_PATH, then <appDir>/launch.json (written by the app), then the usual install
  * locations, then a source checkout (WSC_REPO or the repo this plugin lives in).
@@ -109,11 +152,10 @@ export function locateApp(extraArgs) {
     return { command: 'open', args: ['-a', info.macBundle, '--args', ...extraArgs] };
   }
   if (info) {
-    return {
-      command: info.command,
-      args: [...info.args, ...extraArgs],
-      shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(info.command),
-    };
+    const args = [...info.args, ...extraArgs];
+    return process.platform === 'win32' && /\.(cmd|bat)$/i.test(info.command)
+      ? viaCmd(info.command, args)
+      : { command: info.command, args };
   }
 
   const home = homedir();
@@ -148,11 +190,10 @@ export function locateApp(extraArgs) {
       process.platform === 'win32' ? 'electron.cmd' : 'electron',
     );
     if (existsSync(electronBin)) {
-      return {
-        command: electronBin,
-        args: [repo, ...extraArgs],
-        shell: process.platform === 'win32',
-      };
+      const args = [repo, ...extraArgs];
+      return process.platform === 'win32'
+        ? viaCmd(electronBin, args)
+        : { command: electronBin, args };
     }
   }
   return null;
@@ -167,6 +208,7 @@ async function main() {
     try {
       await request(runtime, 'GET', '/v1/health', null, 800);
       const result = await request(runtime, 'POST', '/v1/command', cmd, 2_000);
+      if (result?.ok === false && result.error) return say(`WSC: ${result.error}`);
       return say(successLine(cmd, result));
     } catch {
       // Stale runtime file or app shutting down: fall through to starting it.

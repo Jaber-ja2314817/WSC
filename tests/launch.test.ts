@@ -1,7 +1,17 @@
-import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { startIngestServer, type IngestServer, type StationCommand } from '../src/main/server';
 
@@ -28,10 +38,14 @@ interface RunResult {
   ms: number;
 }
 
-function run(args: string[], env: Record<string, string>): Promise<RunResult> {
+function run(
+  args: string[],
+  env: Record<string, string>,
+  nodeArgs: string[] = [],
+): Promise<RunResult> {
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn(process.execPath, [LAUNCH, ...args], {
+    const child = spawn(process.execPath, [...nodeArgs, LAUNCH, ...args], {
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -43,7 +57,9 @@ function run(args: string[], env: Record<string, string>): Promise<RunResult> {
   });
 }
 
-async function startApp(): Promise<{ commands: StationCommand[]; env: Record<string, string> }> {
+async function startApp(
+  reply?: Record<string, unknown>,
+): Promise<{ commands: StationCommand[]; env: Record<string, string> }> {
   const commands: StationCommand[] = [];
   server = await startIngestServer({
     port: 0,
@@ -52,6 +68,7 @@ async function startApp(): Promise<{ commands: StationCommand[]; env: Record<str
     onPayload: () => {},
     onCommand: (cmd) => {
       commands.push(cmd);
+      if (reply) return reply;
       return cmd.action === 'status'
         ? { running: true, version: '0.1.0', port: server?.port, eventsReceived: 3, demo: false }
         : undefined;
@@ -79,6 +96,12 @@ const oneLine = (r: RunResult): string => {
 };
 
 describe('launch.mjs with the app running', () => {
+  it('reports a command the app refused instead of claiming success', async () => {
+    const { env } = await startApp({ ok: false, error: 'Unknown theme "typo".' });
+    const r = await run(['theme', 'typo'], env);
+    expect(oneLine(r)).toBe('WSC: Unknown theme "typo".');
+  });
+
   it.each([
     [[], { action: 'focus' }, 'WSC: station focused.'],
     [['compact'], { action: 'compact' }, 'WSC: switched to compact mode.'],
@@ -90,6 +113,32 @@ describe('launch.mjs with the app running', () => {
     const r = await run(args, env);
     expect(oneLine(r)).toBe(line);
     expect(commands).toEqual([expected]);
+  });
+
+  it('never sends the token through an env proxy', async () => {
+    const viaProxy: string[] = [];
+    const proxy = createServer((req, res) => {
+      viaProxy.push(String(req.url));
+      res.writeHead(502).end();
+    });
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+    const proxyPort = (proxy.address() as { port: number }).port;
+    const { commands, env } = await startApp();
+    try {
+      const r = await run(['compact'], {
+        ...env,
+        NODE_USE_ENV_PROXY: '1',
+        HTTP_PROXY: `http://127.0.0.1:${proxyPort}`,
+        http_proxy: `http://127.0.0.1:${proxyPort}`,
+        NO_PROXY: '',
+        no_proxy: '',
+      });
+      expect(oneLine(r)).toBe('WSC: switched to compact mode.');
+      expect(viaProxy).toEqual([]);
+      expect(commands).toEqual([{ action: 'compact' }]);
+    } finally {
+      proxy.close();
+    }
   });
 
   it('reports status from the app', async () => {
@@ -119,6 +168,26 @@ describe('launch.mjs with the app not running', () => {
     expect(oneLine(r)).toBe('WSC: not running. Type /station to start it.');
   });
 
+  it('sends no token to a port whose recorded process is dead', async () => {
+    const tokens: unknown[] = [];
+    const foreign = createServer((req, res) => {
+      tokens.push(req.headers['x-wsc-token']);
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+    });
+    await new Promise<void>((r) => foreign.listen(0, '127.0.0.1', r));
+    const port = (foreign.address() as { port: number }).port;
+    const runtime = join(dir, 'stale.json');
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+    writeFileSync(runtime, JSON.stringify({ port, token: 'x', pid: deadPid, version: '0' }));
+    try {
+      const r = await run(['status'], { WSC_RUNTIME_FILE: runtime });
+      expect(oneLine(r)).toBe('WSC: not running. Type /station to start it.');
+      expect(tokens).toEqual([]);
+    } finally {
+      foreign.close();
+    }
+  });
+
   it('rejects unknown subcommands and bad theme names with a usage line', async () => {
     expect(oneLine(await run(['explode'], notRunning()))).toMatch(/^WSC: usage:/);
     expect(oneLine(await run(['theme', '../../etc'], notRunning()))).toMatch(/^WSC: usage:/);
@@ -141,7 +210,41 @@ describe('launch.mjs with the app not running', () => {
           // Generous: spawning is slow when the whole suite runs in parallel.
           timeout: 8_000,
         })
-        .toBe('--demo');
+        // Not --demo: that pinned mode ignores real sessions and is only for `npm run demo`.
+        .toBe('--play-demo');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'quotes the electron path and repo for a checkout in a folder with spaces on Windows',
+    async () => {
+      const repo = join(dir, 'First Last', 'wsc');
+      mkdirSync(join(repo, 'out', 'main'), { recursive: true });
+      mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
+      writeFileSync(join(repo, 'package.json'), '{"name":"wsc"}');
+      writeFileSync(join(repo, 'out', 'main', 'index.js'), '');
+      const electron = join(repo, 'node_modules', '.bin', 'electron.cmd');
+      writeFileSync(electron, '');
+      const preload = join(dir, 'windows.mjs');
+      writeFileSync(preload, `Object.defineProperty(process, 'platform', { value: 'win32' });\n`);
+      const record = join(dir, 'shell-args.txt');
+      const fakeShell = join(dir, 'fake-cmd');
+      writeFileSync(fakeShell, `#!/bin/sh\nprintf '%s\\n' "$@" > "${record}"\n`);
+      chmodSync(fakeShell, 0o755);
+      const r = await run(
+        [],
+        {
+          WSC_RUNTIME_FILE: join(dir, 'missing.json'),
+          WSC_APP_PATH: '',
+          WSC_REPO: repo,
+          LOCALAPPDATA: join(dir, 'local'),
+          comspec: fakeShell,
+        },
+        [`--import=${pathToFileURL(preload).href}`],
+      );
+      expect(oneLine(r)).toBe('WSC: starting the station…');
+      await expect.poll(() => existsSync(record), { timeout: 3_000 }).toBe(true);
+      expect(readFileSync(record, 'utf8')).toContain(`"${electron}" "${repo}"`);
     },
   );
 

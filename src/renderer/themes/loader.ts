@@ -91,7 +91,9 @@ export async function loadThemeFromManifest(
   opts: LoadThemeOptions = {},
 ): Promise<LoadedTheme> {
   const res = validateTheme(raw);
-  const label = raw && typeof raw === 'object' && 'name' in raw ? String(raw.name) : 'theme';
+  // Not String(): an object `name` can make that throw.
+  const name = raw && typeof raw === 'object' && 'name' in raw ? raw.name : undefined;
+  const label = typeof name === 'string' ? name : 'theme';
   if (!res.ok) {
     const shown = res.errors.slice(0, 3).join('; ');
     const more = res.errors.length > 3 ? ` (+${res.errors.length - 3} more)` : '';

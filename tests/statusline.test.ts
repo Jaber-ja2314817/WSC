@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const STATUSLINE = resolve('plugin/statusline/statusline.mjs');
@@ -38,11 +39,16 @@ interface RunResult {
   ms: number;
 }
 
-function run(input: string, args: string[] = []): Promise<RunResult> {
+function run(
+  input: string,
+  args: string[] = [],
+  extraEnv: Record<string, string> = {},
+  nodeArgs: string[] = [],
+): Promise<RunResult> {
   return new Promise((done) => {
     const started = Date.now();
-    const env = { ...process.env, WSC_RUNTIME_FILE: runtimeFile };
-    const child = spawn(process.execPath, [STATUSLINE, ...args], { env });
+    const env = { ...process.env, WSC_RUNTIME_FILE: runtimeFile, ...extraEnv };
+    const child = spawn(process.execPath, [...nodeArgs, STATUSLINE, ...args], { env });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => (stdout += String(d)));
@@ -52,6 +58,37 @@ function run(input: string, args: string[] = []): Promise<RunResult> {
     child.stdin.end(input);
   });
 }
+
+/** Preload: makes the script think Node took 200 ms to boot, and records when it exits. */
+function slowBootPreload(exitFile: string): string {
+  const file = join(dir, 'slow-boot.mjs');
+  writeFileSync(
+    file,
+    `import { writeFileSync } from 'node:fs';\n` +
+      `while (process.uptime() < 0.2);\n` +
+      `process.on('exit', () => writeFileSync(${JSON.stringify(exitFile)}, String(process.uptime())));\n`,
+  );
+  return `--import=${pathToFileURL(file).href}`;
+}
+
+/** Preload: makes the script take its Windows branches on any OS. */
+function windowsPreload(): string {
+  const file = join(dir, 'windows.mjs');
+  writeFileSync(file, `Object.defineProperty(process, 'platform', { value: 'win32' });\n`);
+  return `--import=${pathToFileURL(file).href}`;
+}
+
+/** A pid that belonged to a process that has already exited. */
+const deadPid = (): number => spawnSync(process.execPath, ['-e', '']).pid;
+
+/** Env that sends every proxied request to `port`, the way a corporate shell profile might. */
+const proxyEnv = (port: number): Record<string, string> => ({
+  NODE_USE_ENV_PROXY: '1',
+  HTTP_PROXY: `http://127.0.0.1:${port}`,
+  http_proxy: `http://127.0.0.1:${port}`,
+  NO_PROXY: '',
+  no_proxy: '',
+});
 
 function listen(server: Server): Promise<number> {
   return new Promise((r) =>
@@ -182,6 +219,75 @@ describe('statusline.mjs', () => {
     }
   });
 
+  it('counts Node boot time against the 300 ms budget', async () => {
+    const server = createServer(() => {
+      /* never respond */
+    });
+    const port = await listen(server);
+    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    const exitFile = join(dir, 'exit-uptime.txt');
+    try {
+      const r = await run(INPUT, [], {}, [slowBootPreload(exitFile)]);
+      expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
+      // Timing from the old start-of-script deadline would land at about 0.5 s.
+      expect(Number(readFileSync(exitFile, 'utf8'))).toBeLessThan(0.42);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it('never sends the token or limits through an env proxy', async () => {
+    const viaProxy: string[] = [];
+    const proxy = createServer((req, res) => {
+      viaProxy.push(String(req.url));
+      res.writeHead(204).end();
+    });
+    const proxyPort = await listen(proxy);
+    const { server, got } = await recorder();
+    try {
+      const r = await run(INPUT, [], proxyEnv(proxyPort));
+      expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
+      expect(viaProxy).toEqual([]);
+      expect(got).toHaveLength(1);
+    } finally {
+      server.close();
+      proxy.close();
+    }
+  });
+
+  it('sends nothing when the runtime file belongs to a dead process', async () => {
+    const { server, got } = await recorder();
+    const { port } = JSON.parse(readFileSync(runtimeFile, 'utf8')) as { port: number };
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 'secret', pid: deadPid(), version: '0' }),
+    );
+    try {
+      expect(await run(INPUT)).toMatchObject({ code: 0, stdout: '', stderr: '' });
+      expect(got).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it.skipIf(process.platform === 'win32').each(['SIGTERM', 'SIGINT', 'SIGHUP'] as const)(
+    'exits 0 on %s while stdin is still open',
+    async (signal) => {
+      const child = spawn(process.execPath, [STATUSLINE], {
+        env: { ...process.env, WSC_RUNTIME_FILE: runtimeFile },
+        stdio: ['pipe', 'ignore', 'ignore'],
+      });
+      // Signal handlers are installed at the top of the script; let it get there.
+      await new Promise((r) => setTimeout(r, 120));
+      const exit = new Promise<[number | null, string | null]>((r) =>
+        child.on('close', (code, sig) => r([code, sig])),
+      );
+      child.kill(signal);
+      expect(await exit).toEqual([0, null]);
+    },
+  );
+
   describe('--then', () => {
     it('runs the original command with the same stdin and prints only its stdout', async () => {
       const { server, got } = await recorder();
@@ -227,6 +333,62 @@ describe('statusline.mjs', () => {
         expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
       }
     });
+
+    it.skipIf(process.platform === 'win32').each(['SIGTERM', 'SIGINT', 'SIGHUP'] as const)(
+      'stops the original command when the bridge gets %s',
+      async (signal) => {
+        const pidFile = join(dir, 'child.pid');
+        const [, then] = thenEcho(
+          `import { writeFileSync } from 'node:fs';` +
+            `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+            `setInterval(() => {}, 1000);`,
+        );
+        const child = spawn(process.execPath, [STATUSLINE, '--then', then!], {
+          env: { ...process.env, WSC_RUNTIME_FILE: runtimeFile },
+          stdio: ['pipe', 'ignore', 'ignore'],
+        });
+        const exit = new Promise<[number | null, string | null]>((r) =>
+          child.on('close', (code, sig) => r([code, sig])),
+        );
+        child.stdin.end(INPUT);
+        await expect.poll(() => existsSync(pidFile), { timeout: 2_500 }).toBe(true);
+        await expect.poll(() => readFileSync(pidFile, 'utf8'), { timeout: 500 }).not.toBe('');
+        const pid = Number(readFileSync(pidFile, 'utf8'));
+        const alive = (): boolean => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        child.kill(signal);
+        try {
+          expect(await exit).toEqual([0, null]);
+          await expect.poll(alive, { timeout: 2_000 }).toBe(false);
+        } finally {
+          if (alive()) process.kill(pid, 'SIGKILL');
+        }
+      },
+      10_000,
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'runs the original command in Git Bash on Windows, not cmd.exe',
+      async () => {
+        const fakeBash = join(dir, 'fake-bash');
+        writeFileSync(fakeBash, `#!/bin/sh\nprintf 'via-bash:'\nexec /bin/sh "$@"\n`);
+        chmodSync(fakeBash, 0o755);
+        const then = Buffer.from('echo hi', 'utf8').toString('base64url');
+        const r = await run(
+          INPUT,
+          ['--then', then],
+          { CLAUDE_CODE_GIT_BASH_PATH: fakeBash, comspec: join(dir, 'no-such-cmd') },
+          [windowsPreload()],
+        );
+        expect(r).toMatchObject({ code: 0, stdout: 'via-bash:hi\n', stderr: '' });
+      },
+    );
 
     it('stops a command that runs past the 3 s cap and prints nothing', async () => {
       const r = await run(

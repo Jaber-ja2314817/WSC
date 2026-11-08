@@ -83,6 +83,23 @@ describe('ingest server', () => {
     expect(payloads).toEqual([]);
   });
 
+  it('accepts everything the forwarder sends, up to 1 MiB', async () => {
+    const s = await start();
+    const post = (size: number): Promise<number | null> =>
+      fetch(url(s, '/v1/events'), {
+        method: 'POST',
+        headers: { 'x-wsc-token': TOKEN },
+        body: JSON.stringify({ ...payload, tool_input: { content: 'x'.repeat(size) } }),
+      }).then(
+        (r) => r.status,
+        () => null,
+      );
+    expect(await post(900 * 1024)).toBeLessThan(300);
+    expect(payloads).toHaveLength(1);
+    expect(await post(1024 * 1024)).not.toBe(204);
+    expect(payloads).toHaveLength(1);
+  });
+
   it('rejects malformed JSON with 400 and keeps running', async () => {
     const s = await start();
     const bad = await fetch(url(s, '/v1/events'), {

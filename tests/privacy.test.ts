@@ -161,6 +161,37 @@ describe('privacy: hook path', () => {
   });
 });
 
+describe('privacy: subagent labels', () => {
+  const secret = 'abc123def';
+  const description = `Deploy with API_KEY=${secret}`;
+
+  it('hook path', () => {
+    const payload = toolPayload('PreToolUse', 'Agent', { description });
+    const events = normalizeHookPayload(payload, 1_000);
+    expect(events.length).toBeGreaterThan(0);
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  it('transcript path', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      sessionId: SESSION_A,
+      cwd: CWD_A,
+      uuid: 'u-label',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      message: {
+        id: 'm-label',
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't-label', name: 'Agent', input: { description } }],
+      },
+    });
+    const ctx = { sessionId: SESSION_A, agentId: 'orchestrator', cwd: CWD_A, toolNames: new Map() };
+    const events = normalizeTranscriptLine(line, ctx);
+    expect(events.length).toBeGreaterThan(0);
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
+});
+
 describe('privacy: transcript path', () => {
   const line = (rec: Record<string, unknown>): string =>
     JSON.stringify({

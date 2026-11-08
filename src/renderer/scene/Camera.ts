@@ -49,14 +49,14 @@ export class Camera {
   setScreenSize(w: number, h: number): void {
     this.screenW = Math.max(1, w);
     this.screenH = Math.max(1, h);
-    this.clamp(this.view);
+    this.clampViews();
     this.apply();
   }
 
   setWorldSize(w: number, h: number): void {
     this.worldW = Math.max(1, w);
     this.worldH = Math.max(1, h);
-    this.clamp(this.view);
+    this.clampViews();
     this.apply();
   }
 
@@ -127,6 +127,11 @@ export class Camera {
     const base = this.target ?? this.view;
     const v = { ...base, x: base.x + dx, y: base.y + dy };
     this.clamp(v);
+    if (this.drag) {
+      // The next pointer move is measured from the drag's start: carry this pan along with it.
+      this.drag.vx += v.x - base.x;
+      this.drag.vy += v.y - base.y;
+    }
     if (this.target) this.target = v;
     else {
       this.view = v;
@@ -197,9 +202,18 @@ export class Camera {
       if (!this.drag) return;
       const dx = e.clientX - this.drag.px;
       const dy = e.clientY - this.drag.py;
-      if (Math.abs(dx) + Math.abs(dy) > 4) this.drag.moved = true;
+      const starting = !this.drag.moved && Math.abs(dx) + Math.abs(dy) > 4;
+      if (starting) this.drag.moved = true;
       if (!this.drag.moved) return;
-      this.target = null;
+      if (starting || this.target) {
+        // Dragging ends any ease, and it must end on the target: stopping partway would leave
+        // a fractional zoom. The view may also have eased since the press, so rebase on it.
+        const base = this.target ?? this.view;
+        this.view = { ...base };
+        this.target = null;
+        this.drag.vx = base.x - dx;
+        this.drag.vy = base.y - dy;
+      }
       const v = { ...this.view, x: this.drag.vx + dx, y: this.drag.vy + dy };
       this.clamp(v);
       this.view = v;
@@ -283,6 +297,11 @@ export class Camera {
     const x = ps.reduce((s, p) => s + p.x, 0) / Math.max(1, ps.length);
     const y = ps.reduce((s, p) => s + p.y, 0) / Math.max(1, ps.length);
     return { x: x - r.left, y: y - r.top };
+  }
+
+  private clampViews(): void {
+    this.clamp(this.view);
+    if (this.target) this.clamp(this.target);
   }
 
   /** Keep the world on screen: center it when smaller than the view, else clamp edges. */

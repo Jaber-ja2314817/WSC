@@ -274,12 +274,22 @@ describe('Director — assignment and walking', () => {
     expect(c.anim).not.toBe('walk');
   });
 
+  it('moves crew from the door to a desk as soon as one opens', () => {
+    make();
+    push(ev({ kind: 'session_start' }), spawn('a1'), spawn('a2'), spawn('a3'));
+    run(6000);
+    expect(at(byAgent('sess-1:a3')!)).toBe('4,7'); // zone a has two desks
+    push(ev({ kind: 'agent_finish', agentId: 'a1' }));
+    run(6000);
+    expect(at(byAgent('sess-1:a3')!)).toBe('1,2');
+  });
+
   it('brings in an extra crew member when the pool is exhausted', () => {
     make({ loungeSize: 1 });
     push(ev({ kind: 'session_start' }), spawn('a1'), spawn('a2'));
     run(50);
     const extra = byAgent('sess-1:a2')!;
-    expect(extra.id).toBe('crew-1');
+    expect(extra.id).toBe('extra-0');
     expect(extra.phase).toBe('arriving');
     expect(at(extra)).toBe('15,14');
     expect(extra.alpha).toBeLessThan(1);

@@ -4,9 +4,11 @@
 //
 // On SessionStart, when WSC isn't running (no runtime file, or a stale one whose port refuses
 // connections), it starts the app detached with `--from-hook --hook-payload=<b64url>` so the new
-// session shows up immediately. Opt out with WSC_AUTOLAUNCH=0 or the `launchOnSessionStart`
-// setting. Only node: builtins are imported statically; the launch.mjs fallback is a guarded
-// dynamic import so a broken or missing file can never print anything.
+// session shows up immediately. Only a session the user just started or resumed launches it: a
+// `/clear` or compaction inside an open session must not bring back an app they quit. Opt out with
+// WSC_AUTOLAUNCH=0 or the `launchOnSessionStart` setting. Only node: builtins are imported
+// statically; the launch.mjs fallback is a guarded dynamic import so a broken or missing file can
+// never print anything.
 import { spawn } from 'node:child_process';
 import {
   appendFileSync,
@@ -17,10 +19,15 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import http from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const TIMEOUT_MS = 300;
+/** process.uptime() misses the exec before Node's clock starts and the teardown after exit. */
+const EXIT_MARGIN_MS = 40;
+/** Kept even when Node boots slowly: a local POST needs a moment, and an event beats silence. */
+const MIN_BUDGET_MS = 100;
 const MAX_BYTES = 1024 * 1024;
 /** Larger SessionStart payloads are not passed on the command line (the app backfills instead). */
 const MAX_PAYLOAD_ARG = 16 * 1024;
@@ -30,8 +37,11 @@ const ERROR_LOG_MAX = 64 * 1024;
 
 const done = () => process.exit(0);
 
-// Hard deadline no matter what is pending.
-setTimeout(done, TIMEOUT_MS).unref();
+// Hard deadline no matter what is pending. Node's boot time counts against it.
+setTimeout(
+  done,
+  Math.max(MIN_BUDGET_MS, TIMEOUT_MS - EXIT_MARGIN_MS - process.uptime() * 1000),
+).unref();
 
 // Mirrors plugin/scripts/runtime-path.mjs and src/main/runtimeFile.ts — keep in sync.
 function runtimeFilePath() {
@@ -86,39 +96,71 @@ function readStdin() {
   });
 }
 
-/** Only the event name is read from the payload here; everything else is the app's job. */
-function peekEventName(body) {
+/** True when a user just started or resumed a session; absent means an older Claude Code. */
+function startsSession(body) {
   try {
-    const name = JSON.parse(body.toString('utf8'))?.hook_event_name;
-    return typeof name === 'string' ? name : null;
+    const payload = JSON.parse(body.toString('utf8'));
+    if (payload?.hook_event_name !== 'SessionStart') return false;
+    const source = payload.source;
+    return typeof source !== 'string' || source === 'startup' || source === 'resume';
   } catch {
-    return null;
+    return false;
   }
 }
 
-/** 'ok' | 'unreachable' (nothing listens: stale runtime file) | 'failed' (timeout, other). */
-async function post(runtime, body) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS - 20);
-  t.unref();
+/** True only when the process that wrote the runtime file is certainly gone. */
+function processGone(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    const res = await fetch(`http://127.0.0.1:${runtime.port}/v1/events`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-wsc-token': runtime.token },
-      body,
-      signal: ctrl.signal,
-    });
-    await res.body?.cancel().catch(() => {});
-    return 'ok';
+    process.kill(pid, 0);
+    return false;
   } catch (err) {
-    const code = err?.cause?.code ?? err?.code;
-    return code === 'ECONNREFUSED' || code === 'EADDRNOTAVAIL' ? 'unreachable' : 'failed';
+    return err?.code === 'ESRCH'; // EPERM means it's alive under another user.
   }
+}
+
+/**
+ * 'ok' | 'unreachable' (not WSC: nothing listens, or something else took the port) | 'failed'.
+ * node:http with `agent: false`, never fetch: fetch can follow NODE_USE_ENV_PROXY and would hand
+ * the token and payload to a proxy. The hard deadline covers a server that never answers.
+ */
+function post(runtime, body) {
+  return new Promise((resolve) => {
+    try {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port: runtime.port,
+          path: '/v1/events',
+          method: 'POST',
+          agent: false,
+          headers: {
+            'content-type': 'application/json',
+            'content-length': body.length,
+            'x-wsc-token': runtime.token,
+          },
+        },
+        (res) => {
+          res.resume();
+          const status = res.statusCode;
+          resolve(status === 401 || status === 403 || status === 404 ? 'unreachable' : 'ok');
+        },
+      );
+      req.on('error', (err) => {
+        const refused = err?.code === 'ECONNREFUSED' || err?.code === 'EADDRNOTAVAIL';
+        resolve(refused ? 'unreachable' : 'failed');
+      });
+      req.end(body);
+    } catch {
+      resolve('failed');
+    }
+  });
 }
 
 /** One short line, never payload content. Capped: when over the cap, keep the newest half. */
 function logError(appDir, message) {
   try {
+    mkdirSync(appDir, { recursive: true }); // The app may never have run.
     const file = join(appDir, 'hook-errors.log');
     const line = `${new Date().toISOString()} ${String(message).slice(0, 200).replace(/\s+/g, ' ')}\n`;
     let size = 0;
@@ -204,6 +246,12 @@ function claimLaunch(appDir) {
   return true;
 }
 
+/**
+ * cmd.exe gets a shell spawn's arguments unquoted, so anything with spaces is quoted here. It is
+ * one string because Node 24+ prints a deprecation warning to stderr for shell plus an args array.
+ */
+const cmdQuote = (s) => (/^[\w.:=\\/-]+$/.test(s) ? s : `"${s}"`);
+
 async function autoLaunch(body) {
   const appDir = dirname(runtimeFilePath());
   try {
@@ -224,11 +272,11 @@ async function autoLaunch(body) {
         args: [...(focus ? [] : ['-g']), '-a', info.macBundle, '--args', ...extraArgs],
       };
     } else if (info) {
-      target = {
-        command: info.command,
-        args: [...info.args, ...extraArgs],
-        shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(info.command),
-      };
+      const args = [...info.args, ...extraArgs];
+      target =
+        process.platform === 'win32' && /\.(cmd|bat)$/i.test(info.command)
+          ? { command: [info.command, ...args].map(cmdQuote).join(' '), args: [], shell: true }
+          : { command: info.command, args };
     } else {
       target = await locateViaLauncher(extraArgs);
       if (target && !focus && target.command === 'open' && target.args[0] === '-a') {
@@ -262,11 +310,11 @@ async function main() {
   const runtime = readRuntime();
   const body = await readStdin();
   if (!body || body.length === 0) return;
-  if (runtime) {
+  if (runtime && !processGone(runtime.pid)) {
     const result = await post(runtime, body);
     if (result !== 'unreachable') return;
   }
-  if (peekEventName(body) === 'SessionStart') await autoLaunch(body);
+  if (startsSession(body)) await autoLaunch(body);
 }
 
 process.on('uncaughtException', done);

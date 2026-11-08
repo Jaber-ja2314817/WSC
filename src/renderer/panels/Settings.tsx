@@ -1,6 +1,6 @@
 // Settings tab: every user setting, theme picker, tool mappings, maintenance actions and About.
 import { useState } from 'preact/hooks';
-import type { ConnectionTest, WscApi } from '@shared/ipc';
+import { supportsLoginItem, type ConnectionTest, type WscApi } from '@shared/ipc';
 import { TOOL_CATEGORIES, type Settings } from '@shared/settings';
 import type { ToolCategory } from '@shared/types';
 
@@ -259,9 +259,11 @@ export function SettingsPanel({ api, settings, themes, version }: SettingsPanelP
         <Row label="Notify when an agent needs you" hint="Native OS notification">
           <Toggle value={settings.notifications} onChange={(v) => set({ notifications: v })} />
         </Row>
-        <Row label="Launch at login">
-          <Toggle value={settings.launchAtLogin} onChange={(v) => set({ launchAtLogin: v })} />
-        </Row>
+        {supportsLoginItem(navigator.userAgent) && (
+          <Row label="Launch at login">
+            <Toggle value={settings.launchAtLogin} onChange={(v) => set({ launchAtLogin: v })} />
+          </Row>
+        )}
         <Row label="Port" hint="Applies on next launch">
           <NumberInput
             value={settings.port}

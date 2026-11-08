@@ -8,7 +8,7 @@ This guide takes you from nothing to watching your Claude Code agents on the sta
 
 - **Claude Code** 2.1.294 or newer. WSC is verified against 2.1.294; check yours with `claude --version`.
 - **Node.js** 20 or newer on your `PATH`. The hook forwarder is a tiny Node script; Claude Code already needs Node, so you almost certainly have it.
-- **macOS** 12+ (Apple silicon or Intel), **Windows** 10/11 (x64) or **Linux** (x64, AppImage).
+- **macOS** 13+ (Apple silicon or Intel), **Windows** 10/11 (x64) or **Linux** (x64, AppImage).
 
 WSC costs nothing to run. It never calls a model API, never sends prompts, and never talks to the internet.
 
@@ -36,7 +36,7 @@ Download the latest release from **https://github.com/OWNER/wsc/releases**.
 | ------- | ------------------------------------------------------------------------------------ |
 | macOS   | `WSC-<version>-mac-arm64.dmg` (Apple silicon) or `WSC-<version>-mac-x64.dmg` (Intel) |
 | Windows | `WSC-<version>-win-x64.exe`                                                          |
-| Linux   | `WSC-<version>-linux-x64.AppImage`                                                   |
+| Linux   | `WSC-<version>-linux-x86_64.AppImage`                                                |
 
 The builds are **not code-signed yet**, so your OS will warn you the first time.
 
@@ -107,8 +107,10 @@ Run something multi-agent in Claude Code. For example: _"Use two subagents in pa
   - report frequency (minimal, normal, chatty);
   - stale, linger and idle-project timeouts;
   - status and catchphrase bubbles, and full tool details (off by default);
-  - notifications (off), reduce motion (follows the OS) and launch at login;
+  - notifications (off), reduce motion (follows the OS) and launch at login (macOS and Windows; the toggle is hidden on Linux);
   - custom tool → category mappings.
+
+  You can also edit `settings.json` by hand, even while WSC runs: saves re-read the file first, so your edits are kept. If the file can't be parsed, WSC runs on defaults, shows a banner, and keeps your file as `settings.json.corrupt-<timestamp>` before it next saves.
 
 ## 7. Manual hook install (without the plugin)
 
@@ -367,7 +369,7 @@ The first-run screen in the app shows the same snippet, with a **Copy** button.
    - macOS: `~/Library/Application Support/WSC/themes/<theme-id>/`
    - Windows: `%APPDATA%\WSC\themes\<theme-id>\`
    - Linux: `~/.config/WSC/themes/<theme-id>/`
-3. Run `/station theme <theme-id>`, or pick it from the tray menu.
+3. Run `/station theme <theme-id>`, or pick it from the tray menu. A theme copied in while WSC runs appears without a restart.
 
 Invalid themes fall back to Spaceship and show a warning banner. The station is never blank. To make your own theme, see [docs/themes.md](docs/themes.md).
 

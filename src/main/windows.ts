@@ -22,19 +22,41 @@ export interface WindowManagerOptions {
   onModeChange?(mode: WindowMode): void;
 }
 
-/** True if at least a 64×64 px part of the bounds is on some display. */
+/** Height of the strip along the top of a window that has to stay reachable. */
+const TITLE_STRIP = 32;
+
+/** True if the window's title bar can be reached: its top strip is at least 64 px on a display. */
 export function boundsVisible(b: Bounds, displays: Bounds[]): boolean {
   return displays.some((d) => {
     const w = Math.min(b.x + b.width, d.x + d.width) - Math.max(b.x, d.x);
-    const h = Math.min(b.y + b.height, d.y + d.height) - Math.max(b.y, d.y);
-    return w >= 64 && h >= 64;
+    const h = Math.min(b.y + TITLE_STRIP, d.y + d.height) - Math.max(b.y, d.y);
+    return w >= 64 && h >= TITLE_STRIP;
   });
+}
+
+/** Shrinks a window that no longer fits its display (saved on a bigger monitor) and moves it in. */
+export function clampBounds(b: Bounds, displays: Bounds[]): Bounds {
+  const overlap = (d: Bounds): number =>
+    Math.max(0, Math.min(b.x + b.width, d.x + d.width) - Math.max(b.x, d.x)) *
+    Math.max(0, Math.min(b.y + b.height, d.y + d.height) - Math.max(b.y, d.y));
+  const d = displays.reduce<Bounds | undefined>(
+    (best, c) => (!best || overlap(c) > overlap(best) ? c : best),
+    undefined,
+  );
+  if (!d || (b.width <= d.width && b.height <= d.height)) return b;
+  const width = Math.min(b.width, d.width);
+  const height = Math.min(b.height, d.height);
+  return {
+    x: Math.max(d.x, Math.min(b.x, d.x + d.width - width)),
+    y: Math.max(d.y, Math.min(b.y, d.y + d.height - height)),
+    width,
+    height,
+  };
 }
 
 export class WindowManager {
   private win: BrowserWindow | null = null;
   private currentMode: WindowMode;
-  ready = false;
 
   constructor(private readonly opts: WindowManagerOptions) {
     this.currentMode = opts.settings.windowState.mode;
@@ -57,10 +79,10 @@ export class WindowManager {
     const size = SIZES[mode];
     const saved = this.opts.settings.windowState.bounds[mode];
     const displays = screen.getAllDisplays().map((d) => d.workArea);
-    const bounds = saved && boundsVisible(saved, displays) ? saved : undefined;
+    const bounds =
+      saved && boundsVisible(saved, displays) ? clampBounds(saved, displays) : undefined;
     const compact = mode === 'compact';
 
-    this.ready = false;
     const win = new BrowserWindow({
       ...size,
       ...(bounds ?? {}),
@@ -98,10 +120,7 @@ export class WindowManager {
     };
     win.on('resize', saveBounds);
     win.on('move', saveBounds);
-    win.webContents.on('did-finish-load', () => {
-      this.ready = true;
-      this.opts.onReady(win);
-    });
+    win.webContents.on('did-finish-load', () => this.opts.onReady(win));
     // External links open in the user's browser; nothing navigates the app window.
     win.webContents.setWindowOpenHandler(({ url }) => {
       // User-clicked https:// links (docs, releases) open in the user's own browser — not an app

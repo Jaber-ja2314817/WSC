@@ -108,6 +108,8 @@ export class StationScene {
     });
     this.detachInput = this.attachPointer(app.canvas);
     this.camera.attach(app.canvas);
+    // Listens after Pixi's own handler, so its GPU state is ready by the time this runs.
+    app.canvas.addEventListener('webglcontextrestored', this.onContextRestored);
   }
 
   get tile(): number {
@@ -117,8 +119,7 @@ export class StationScene {
   setTheme(theme: ThemeRuntime): void {
     this.theme = theme;
     // Crew textures change completely: drop the pools and rebuild everything.
-    for (const id of [...this.crew.keys()]) this.removeCrew(id);
-    for (const id of [...this.bubbles.keys()]) this.removeBubble(id);
+    this.dropActors();
     const tex = theme.backdrop?.(256, 256) ?? null;
     this.backdrop.texture = tex ?? emptyTexture();
     this.backdrop.visible = !!tex;
@@ -202,9 +203,27 @@ export class StationScene {
   }
 
   destroy(): void {
+    this.app.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
     this.detachInput?.();
     this.camera.destroy();
     this.app.stage.removeChildren();
+  }
+
+  /**
+   * Cached floors and text textures live only on the GPU, and Pixi doesn't redraw them after a
+   * lost context, so everything drawn once is drawn again. Crew come back on the next frame.
+   * Pixi also keeps its record of bound textures across the loss, and whatever it believes is
+   * still bound draws black until that record is reset.
+   */
+  private readonly onContextRestored = (): void => {
+    this.app.renderer.resetState();
+    this.dropActors();
+    if (this.layout) this.build(this.layout, new Set(this.zones.keys()));
+  };
+
+  private dropActors(): void {
+    for (const id of [...this.crew.keys()]) this.removeCrew(id);
+    for (const id of [...this.bubbles.keys()]) this.removeBubble(id);
   }
 
   // ── static layers ──────────────────────────────────────────────────────────

@@ -50,6 +50,7 @@ const api: WscApi = {
   getTimeline: (sessionId) =>
     ipcRenderer.invoke(IPC.getTimeline, sessionId) as Promise<TimelineStep[]>,
   setVisible: (visible) => ipcRenderer.send(IPC.visibility, visible === true),
+  rendererReady: () => ipcRenderer.send(IPC.rendererReady),
 };
 
 contextBridge.exposeInMainWorld('wsc', api);

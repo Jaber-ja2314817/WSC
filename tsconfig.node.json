@@ -25,5 +25,5 @@
       "@shared/*": ["./src/shared/*"]
     }
   },
-  "exclude": ["tests/themeManager.test.ts"]
+  "exclude": ["tests/themeManager.test.ts", "tests/camera.test.ts"]
 }

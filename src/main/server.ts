@@ -5,7 +5,7 @@ import { timingSafeEqual } from 'node:crypto';
 export interface IngestServerOptions {
   port: number;
   token: string;
-  /** Max request body in bytes (default 256 KB). */
+  /** Max request body in bytes (default 1 MiB, the most plugin/hooks/forward.mjs sends). */
   maxBytes?: number;
   version?: string;
   host?: '127.0.0.1';
@@ -43,7 +43,7 @@ export interface IngestServer {
   stats(): { received: number; rejected: number };
 }
 
-const DEFAULT_MAX_BYTES = 256 * 1024;
+const DEFAULT_MAX_BYTES = 1024 * 1024;
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);

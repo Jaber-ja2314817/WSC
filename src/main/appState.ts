@@ -1,5 +1,5 @@
 // Tiny persisted app flags (never event contents). Lives next to the runtime file in app data.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { PlanLimits } from '@shared/dashboardTypes';
 import { normalizeRateLimits } from '@shared/normalizer';
@@ -37,7 +37,9 @@ export function writeAppFlags(flags: AppFlags): void {
   try {
     const file = appFlagsPath();
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    writeFileSync(file, JSON.stringify(flags), { mode: 0o600 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(flags), { mode: 0o600 });
+    renameSync(tmp, file);
   } catch {
     // Non-critical: worst case the first-run screen shows again.
   }

@@ -1,7 +1,7 @@
 // Claude Code hook payload → StationEvent[].
 // The ONLY place that knows the raw hook JSON format (see docs/claude-code-integration.md).
 import { projectIdFor, projectNameFor } from '../projects';
-import { summarizeTool } from '../redact';
+import { safeLabel, summarizeTool } from '../redact';
 import { categorizeTool } from '../toolCategories';
 import {
   ORCHESTRATOR_ID,
@@ -9,6 +9,7 @@ import {
   type StationEventKind,
   type ToolCategory,
 } from '../types';
+import { isFinalTool } from './transcript';
 
 export interface HookNormalizeOptions {
   toolOverrides?: Record<string, ToolCategory>;
@@ -55,6 +56,7 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
   const isSubagent = rawAgentId !== undefined;
   const agentId = isSubagent ? rawAgentId.replace(/^agent-/, '') : ORCHESTRATOR_ID;
   const agentType = str(p, 'agent_type');
+  const label = agentType ? safeLabel(agentType) : '';
   const toolName = str(p, 'tool_name');
   const toolUseId = str(p, 'tool_use_id');
 
@@ -66,7 +68,7 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
     sessionId,
     agentId,
     ...(isSubagent ? { parentAgentId: ORCHESTRATOR_ID } : {}),
-    ...(agentType ? { label: agentType } : {}),
+    ...(label ? { label } : {}),
   };
 
   const genericId = (kind: StationEventKind): string =>
@@ -89,11 +91,14 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
       ...(summary !== undefined ? { summary } : {}),
       ...(ok !== undefined ? { ok } : {}),
       ...(toolUseId ? { useId: toolUseId } : {}),
+      ...(isFinalTool(toolName) ? { finalizing: true } : {}),
     };
   };
 
   switch (hookEvent) {
     case 'SessionStart':
+      // A compaction restarts nothing: the session carries on, mid-turn.
+      if (str(p, 'source') === 'compact') return [];
       return make('session_start', `${sessionId}:session:start:${receivedAt}`);
     case 'SessionEnd':
       return make('session_end', genericId('session_end'));
@@ -113,8 +118,8 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
       if (t?.category === 'delegate' && (toolName === 'Task' || toolName === 'Agent')) {
         const input = p['tool_input'];
         const i = input && typeof input === 'object' ? (input as Raw) : {};
-        const label = str(i, 'subagent_type') ?? str(i, 'description');
-        if (label) extra.label = label;
+        const delegateLabel = safeLabel(str(i, 'subagent_type') ?? str(i, 'description') ?? '');
+        if (delegateLabel) extra.label = delegateLabel;
       }
       return make('tool_start', `${sessionId}:tool:${toolKey}:start`, extra);
     }
@@ -122,9 +127,13 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
       if (!toolName) return [];
       return make('tool_end', `${sessionId}:tool:${toolKey}:end`, { tool: tool(true) });
     case 'PostToolUseFailure':
-    case 'PermissionDenied':
+    case 'PermissionDenied': {
       if (!toolName) return [];
-      return make('tool_end', `${sessionId}:tool:${toolKey}:end`, { tool: tool(false) });
+      const end = make('tool_end', `${sessionId}:tool:${toolKey}:end`, { tool: tool(false) });
+      // Esc: no Stop follows, and the transcript's interrupt line has an older time than this.
+      const interrupted = !isSubagent && p['is_interrupt'] === true;
+      return interrupted ? [...end, ...make('idle', genericId('idle'))] : end;
+    }
     case 'PermissionRequest':
       return make('waiting_for_user', genericId('waiting_for_user'), { tool: tool() });
     case 'Notification': {
@@ -145,7 +154,7 @@ function normalize(raw: unknown, receivedAt: number, opts?: HookNormalizeOptions
     case 'PreCompact':
       return make('compacting', genericId('compacting'));
     case 'PostCompact':
-      return make('idle', genericId('idle'));
+      return make('idle', genericId('idle'), { idleReason: 'compact' });
     default:
       // PostToolBatch, CwdChanged (session keeps its zone) and unknown events.
       return [];

@@ -54,6 +54,19 @@ describe('no outbound network', () => {
     }
   });
 
+  it('every http.request targets 127.0.0.1 and skips the proxy-aware global agent', () => {
+    const requesters = [...new Set(hits.filter((h) => /\bhttp\.request\(/.test(h.text)))];
+    expect(requesters.length).toBeGreaterThan(0);
+    for (const h of requesters) {
+      const after = readFileSync(h.file, 'utf8')
+        .split('\n')
+        .slice(h.line, h.line + 12)
+        .join('\n');
+      expect(after, `${h.file}:${h.line}`).toMatch(/host: '127\.0\.0\.1'/);
+      expect(after, `${h.file}:${h.line}`).toMatch(/agent: false/);
+    }
+  });
+
   it('openExternal is only used for https links, behind a check', () => {
     for (const h of hits.filter((x) => x.text.includes('openExternal('))) {
       expect(h.text, `${h.file}:${h.line}`).toMatch(/startsWith\('https:\/\/'\)/);

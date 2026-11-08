@@ -11,6 +11,8 @@ import {
   normalizeTranscriptLine,
   stripAgentPrefix,
   type TranscriptContext,
+  HANDBACK_TOOL,
+  WORKFLOW_RESULT_TOOL,
 } from '@shared/normalizer/transcript';
 import { projectIdFor, projectNameFor } from '@shared/projects';
 import { ORCHESTRATOR_ID, type StationEvent, type ToolCategory } from '@shared/types';
@@ -19,6 +21,19 @@ const DEFAULT_MAX_AGE_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 /** A subagent quiet for this long (with its spawn call answered) counts as finished. */
 const DEFAULT_FINISH_GRACE_MS = 60 * 1000;
+/** The session's cwd comes from the file's head, even when only its tail is read. */
+const HEAD_BYTES = 64 * 1024;
+/**
+ * Workflow agents never hand back: most end on a StructuredOutput call and the rest on plain
+ * text, and nothing else marks the end. A workflow can run dozens of them, so they get a shorter
+ * quiet limit than subagents. If one was only in a long model call, its next tool call revives it.
+ */
+export const WORKFLOW_QUIET_MS = 3 * 60_000;
+
+/** True for the tool call that ends a subagent (or, in a workflow, a workflow agent). */
+export function isTerminalTool(name: string | undefined, workflow: boolean): boolean {
+  return name === HANDBACK_TOOL || (workflow && name === WORKFLOW_RESULT_TOOL);
+}
 
 export interface BackfillOptions {
   now?: number;
@@ -62,12 +77,49 @@ async function readTailLines(path: string, maxBytes: number): Promise<string[]> 
   }
 }
 
+/** Reads the first `maxBytes` of a file as lines; a cut-off last line fails to parse and is skipped. */
+async function readHeadLines(path: string, maxBytes: number): Promise<string[]> {
+  try {
+    const fh = await open(path, 'r');
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
+      return buf.toString('utf8', 0, bytesRead).split('\n');
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
 async function safeReaddir(dir: string): Promise<string[]> {
   try {
     return await readdir(dir);
   } catch {
     return [];
   }
+}
+
+const isAgentFile = (f: string): boolean => f.startsWith('agent-') && f.endsWith('.jsonl');
+
+/**
+ * A session's agent transcripts, given its `subagents` folder: direct subagents, plus workflow
+ * agents in workflows/<wf>/ (their meta.json sits beside them; journal.jsonl is not a transcript).
+ */
+export async function agentTranscripts(
+  subDir: string,
+): Promise<{ path: string; workflow: boolean }[]> {
+  const entries = await safeReaddir(subDir);
+  const out = entries.filter(isAgentFile).map((f) => ({ path: join(subDir, f), workflow: false }));
+  if (!entries.includes('workflows')) return out;
+  const root = join(subDir, 'workflows');
+  for (const wf of await safeReaddir(root)) {
+    for (const f of await safeReaddir(join(root, wf))) {
+      if (isAgentFile(f)) out.push({ path: join(root, wf, f), workflow: true });
+    }
+  }
+  return out;
 }
 
 async function safeMtime(path: string): Promise<number | undefined> {
@@ -123,7 +175,8 @@ async function backfillSession(
   } catch {
     return { sessions: 0, agents: 0 };
   }
-  const cwd = firstCwd(lines);
+  // The head, not the tail: a session stays in the zone it started in, even after a `cd`.
+  const cwd = firstCwd(await readHeadLines(transcriptPath, HEAD_BYTES)) ?? firstCwd(lines);
   if (!cwd) return { sessions: 0, agents: 0 };
 
   const events: StationEvent[] = [];
@@ -158,15 +211,12 @@ async function backfillSession(
     kind: 'session_start',
   });
 
-  // Subagents: <dir>/<sessionId>/subagents/agent-<id>.jsonl (+ agent-<id>.meta.json)
+  // Subagents: <dir>/<sessionId>/subagents/agent-<id>.jsonl (+ agent-<id>.meta.json), and
+  // workflow agents in subagents/workflows/<wf>/.
   const subDir = join(dirname(transcriptPath), sessionId, 'subagents');
-  const files = (await safeReaddir(subDir)).filter(
-    (f) => f.startsWith('agent-') && f.endsWith('.jsonl'),
-  );
   let agents = 0;
-  for (const file of files) {
-    const agentId = stripAgentPrefix(basename(file, '.jsonl'));
-    const path = join(subDir, file);
+  for (const { path, workflow } of await agentTranscripts(subDir)) {
+    const agentId = stripAgentPrefix(basename(path, '.jsonl'));
     const mtime = await safeMtime(path);
     if (mtime === undefined) continue;
     let subLines: string[];
@@ -175,7 +225,7 @@ async function backfillSession(
     } catch {
       continue;
     }
-    const meta = await readJson(join(subDir, `agent-${agentId}.meta.json`));
+    const meta = await readJson(join(dirname(path), `agent-${agentId}.meta.json`));
     const subCtx: TranscriptContext = {
       sessionId,
       agentId,
@@ -193,7 +243,7 @@ async function backfillSession(
     );
     agents++;
 
-    if (isFinished(subEvents, meta, answeredInParent, mtime, now, grace)) {
+    if (isFinished(subEvents, meta, answeredInParent, mtime, now, grace, workflow)) {
       events.push({
         id: `${sessionId}:agent:${agentId}:finish`,
         ts: mtime,
@@ -229,19 +279,21 @@ function isFinished(
   mtime: number,
   now: number,
   grace: number,
+  workflow: boolean,
 ): boolean {
-  // Subagents end by calling the hand-back tool (verified live, Claude Code 2.1.294).
-  if (subEvents.some((e) => e.kind === 'tool_start' && e.tool?.name === 'SubagentHandback')) {
-    return true;
-  }
+  const starts = subEvents.filter((e) => e.kind === 'tool_start');
+  const last = starts[starts.length - 1];
+  // Subagents end by calling the hand-back tool (verified live, Claude Code 2.1.294). Only the
+  // last call counts: a subagent continued after handing back is working again.
+  if (isTerminalTool(last?.tool?.name, workflow)) return true;
   if (now - mtime >= LONG_QUIET_MS) return true;
+  const answered =
+    !last || subEvents.some((e) => e.kind === 'tool_end' && e.tool?.useId === last.tool?.useId);
+  if (workflow && answered && now - mtime >= WORKFLOW_QUIET_MS) return true;
   const spawnUseId = metaToolUseId(meta);
   if (!spawnUseId || !answeredInParent.has(spawnUseId)) return false;
   if (now - mtime < grace) return false;
-  const starts = subEvents.filter((e) => e.kind === 'tool_start');
-  const last = starts[starts.length - 1];
-  if (!last) return true;
-  return subEvents.some((e) => e.kind === 'tool_end' && e.tool?.useId === last.tool?.useId);
+  return answered;
 }
 
 /** Backfill every session touched within `maxAgeMs` across all project folders. */
@@ -273,8 +325,8 @@ async function isRecent(transcriptPath: string, cutoff: number): Promise<boolean
   const mtime = await safeMtime(transcriptPath);
   if (mtime !== undefined && mtime >= cutoff) return true;
   const subDir = join(dirname(transcriptPath), basename(transcriptPath, '.jsonl'), 'subagents');
-  for (const f of await safeReaddir(subDir)) {
-    const m = await safeMtime(join(subDir, f));
+  for (const { path } of await agentTranscripts(subDir)) {
+    const m = await safeMtime(path);
     if (m !== undefined && m >= cutoff) return true;
   }
   return false;

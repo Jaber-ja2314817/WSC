@@ -15,6 +15,8 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -99,7 +101,21 @@ function backup(file) {
   throw new CliError(`could not create a backup of ${file}`);
 }
 
-function writeAtomic(file, value) {
+/** The real file behind a symlink, even a dangling one: renaming over a link would replace it. */
+function followLinks(file) {
+  try {
+    return realpathSync(file);
+  } catch {
+    try {
+      return resolve(dirname(file), readlinkSync(file));
+    } catch {
+      return file; // New file.
+    }
+  }
+}
+
+function writeAtomic(path, value) {
+  const file = followLinks(path);
   mkdirSync(dirname(file), { recursive: true });
   let mode = 0o600;
   try {

@@ -166,9 +166,14 @@ export class Director {
       } else if (s.phase === 'working' || s.phase === 'lounge_idle' || s.phase === 'reporting') {
         // At rest: make sure the spot still exists where we stand (e.g. a desk moved).
         const rest = this.restingSpot(s);
-        if (rest && (rest.tile.x !== s.x || rest.tile.y !== s.y)) this.snapTo(s, rest, false);
+        if (rest && (rest.tile.x !== s.x || rest.tile.y !== s.y)) {
+          // Crew walk to a desk that moved, so a growing room never makes them jump.
+          if (s.phase === 'working' && s.intent === 'desk') s.plannedIntent = undefined;
+          else this.snapTo(s, rest, false);
+        }
       }
     }
+    this.compactSeats();
     this.ensurePool(this.now);
   }
 
@@ -253,6 +258,9 @@ export class Director {
       if (s.isOrchestrator && s.sessionId && !live.has(s.sessionId) && !s.leaving) {
         s.leaving = true;
         s.alphaTarget = 0;
+        if (s.seat !== undefined && this.seats.get(s.seat) === s.sessionId) {
+          this.seats.delete(s.seat);
+        }
       }
     }
     for (const session of sessions) {
@@ -268,6 +276,8 @@ export class Director {
           phase: 'seated',
         });
         this.placeOrchestrator(s);
+      } else if (s.leaving) {
+        this.reclaimSeat(s, session.id);
       }
       s.leaving = false;
       s.alphaTarget = 1;
@@ -275,6 +285,7 @@ export class Director {
       const agent = snap.agents[agentKey(session.id, ORCHESTRATOR_ID)];
       if (agent) this.orchestratorBubbles(s, agent, now);
     }
+    this.compactSeats();
   }
 
   private bind(agent: AgentState, key: string, now: number): Sprite {
@@ -291,8 +302,10 @@ export class Director {
       this.say(s, 'assigned', now);
     } else {
       // Pool exhausted: a new crew member arrives so every real agent is represented.
-      const idx = this.settings.loungeSize + this.extraSeq++;
-      s = this.newSprite(`crew-${idx}`, idx, now, { phase: 'arriving' });
+      // Its own id space: `crew-N` could still be a bound pool member after the lounge shrank.
+      const seq = this.extraSeq++;
+      const idx = this.settings.loungeSize + seq;
+      s = this.newSprite(`extra-${seq}`, idx, now, { phase: 'arriving' });
       s.pool = false;
       s.poolIndex = idx;
       s.alpha = 0;
@@ -341,6 +354,9 @@ export class Director {
       }
     }
     s.lastStatus = status;
+    // The zone stops counting finished crew straight away, so their desk is free for the next
+    // agent even while they are still off to report.
+    if (status === 'done' || status === 'error') this.releaseDesk(s);
 
     let intent = this.intentFor(status);
     if (
@@ -417,7 +433,7 @@ export class Director {
       s.phaseUntil = undefined;
       // Plans and leaves the phase; if the zone isn't laid out yet, retries next frame.
       this.plan(s, now);
-    } else if (s.intent && s.intent !== s.plannedIntent) {
+    } else if (s.intent && (s.intent !== s.plannedIntent || this.deskFreedUp(s))) {
       this.plan(s, now);
     }
 
@@ -574,6 +590,13 @@ export class Director {
     return { id: `${zone.projectId}:door`, tile: zone.door, facing: 'up' };
   }
 
+  /** Standing by the door, or on the way there, and a seat has opened up. */
+  private deskFreedUp(s: Sprite): boolean {
+    if (s.intent !== 'desk' || s.deskId || !s.agentKey || !s.projectId) return false;
+    const zone = this.layout?.zones.find((z) => z.projectId === s.projectId);
+    return zone?.desks.some((d) => !this.desks.has(d.id)) ?? false;
+  }
+
   private releaseDesk(s: Sprite): void {
     if (s.deskId && this.desks.get(s.deskId) === s.agentKey) this.desks.delete(s.deskId);
     s.deskId = undefined;
@@ -603,6 +626,29 @@ export class Director {
     while (this.seats.has(i)) i++;
     this.seats.set(i, sessionId);
     return i;
+  }
+
+  /** A leaving orchestrator gave up its seat; a session that came back needs one again. */
+  private reclaimSeat(s: Sprite, sessionId: string): void {
+    if (s.seat !== undefined && !this.seats.has(s.seat)) this.seats.set(s.seat, sessionId);
+    else s.seat = this.freeSeat(sessionId);
+    this.placeOrchestrator(s);
+  }
+
+  /** Seats past the end of the table (it shrank) would wrap onto someone else's tile. */
+  private compactSeats(): void {
+    const count = this.layout?.center.tableSeats.length ?? 0;
+    for (const s of this.sprites.values()) {
+      if (!s.isOrchestrator || s.leaving || !s.sessionId) continue;
+      if (s.seat === undefined || s.seat < count) continue;
+      let free = 0;
+      while (free < count && this.seats.has(free)) free++;
+      if (free >= count) return; // more sessions than the station has room for
+      this.seats.delete(s.seat);
+      this.seats.set(free, s.sessionId);
+      s.seat = free;
+      this.placeOrchestrator(s);
+    }
   }
 
   private placeOrchestrator(s: Sprite): void {

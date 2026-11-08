@@ -1,7 +1,7 @@
 // User/community themes: <appData>/WSC/themes/<id>/theme.json (+ PNG assets).
 // Everything read from this folder is untrusted: sizes are capped, paths are confined to the
 // theme's own folder, and only PNG assets are served (as data: URLs, which the CSP allows).
-import { watch, type FSWatcher } from 'node:fs';
+import { mkdirSync, watch, type FSWatcher } from 'node:fs';
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, normalize, relative, sep } from 'node:path';
 import type { BrowserWindow, IpcMain } from 'electron';
@@ -126,13 +126,14 @@ export async function getUserTheme(
 
 /**
  * IPC for user themes. Call once from main after app ready:
- * `registerUserThemeIpc(ipcMain, () => mainWindow, !app.isPackaged)`.
- * In dev (`watchForChanges`), edits under the themes folder emit IPC.themesChanged (debounced).
+ * `registerUserThemeIpc(ipcMain, () => mainWindow)`.
+ * Edits under the themes folder emit IPC.themesChanged (debounced), so a theme copied in while the
+ * app runs shows up right away. Tests can turn that off with `watchForChanges`.
  */
 export function registerUserThemeIpc(
   ipcMain: IpcMain,
   getWindow: () => BrowserWindow | null,
-  watchForChanges = false,
+  watchForChanges = true,
 ): () => void {
   ipcMain.handle(IPC.listUserThemes, async (): Promise<UserThemeInfo[]> =>
     (await listUserThemes()).map(({ id, name }) => ({ id, name })),
@@ -145,13 +146,15 @@ export function registerUserThemeIpc(
   let timer: NodeJS.Timeout | null = null;
   if (watchForChanges) {
     try {
+      // A first theme usually lands in a folder that doesn't exist yet.
+      mkdirSync(userThemesDir(), { recursive: true, mode: 0o700 });
       watcher = watch(userThemesDir(), { recursive: true }, () => {
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => getWindow()?.webContents.send(IPC.themesChanged), 300);
       });
       watcher.on('error', () => watcher?.close());
     } catch {
-      // Folder doesn't exist yet: nothing to hot-reload.
+      // Read-only app data or no recursive watch: themes are picked up on the next launch.
     }
   }
   return () => {

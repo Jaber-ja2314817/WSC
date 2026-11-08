@@ -1,10 +1,11 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseWindowState, SettingsStore } from '../src/main/settings';
 import { trayStatusFor } from '../src/main/tray';
-import { boundsVisible } from '../src/main/windows';
+import { boundsVisible, clampBounds } from '../src/main/windows';
+import { supportsLoginItem } from '../src/shared/ipc';
 import { DEFAULT_SETTINGS, mergeSettings, parseSettings } from '../src/shared/settings';
 import { StationStore } from '../src/shared/store';
 import { ev } from './fixtures/events';
@@ -137,6 +138,70 @@ describe('SettingsStore (main)', () => {
     expect(new SettingsStore(dir).get()).toEqual(DEFAULT_SETTINGS);
   });
 
+  const fullPrice = { input: 1, output: 2, cacheWrite: 3, cacheRead: 4 };
+  const readSaved = async (): Promise<Record<string, unknown>> =>
+    JSON.parse(await readFile(join(dir, 'settings.json'), 'utf8')) as Record<string, unknown>;
+
+  it('keeps a hand edit made while the app runs when the app saves', async () => {
+    const store = new SettingsStore(dir);
+    store.update({ loungeSize: 9 });
+    const edited = { ...(await readSaved()), prices: { opus: fullPrice } };
+    await writeFile(join(dir, 'settings.json'), JSON.stringify(edited));
+    const seen: unknown[] = [];
+    store.onChange((s) => seen.push(s.prices));
+    store.update({ dashboardOpen: false });
+    expect(await readSaved()).toMatchObject({
+      loungeSize: 9,
+      dashboardOpen: false,
+      prices: { opus: fullPrice },
+    });
+    expect(seen).toEqual([{ opus: fullPrice }]);
+  });
+
+  it('moves an unreadable settings.json aside before anything overwrites it', async () => {
+    await writeFile(join(dir, 'settings.json'), '{ "loungeSize": 9, }');
+    const store = new SettingsStore(dir);
+    expect(store.warning).toContain('default settings');
+    expect((await readdir(dir)).filter((f) => f.includes('corrupt'))).toEqual([]);
+
+    store.update({ theme: 'home' });
+    const aside = (await readdir(dir)).filter((f) => f.startsWith('settings.json.corrupt-'));
+    expect(aside).toHaveLength(1);
+    expect(await readFile(join(dir, aside[0]!), 'utf8')).toBe('{ "loungeSize": 9, }');
+    expect(await readSaved()).toMatchObject({ theme: 'home' });
+    expect(store.warning).toContain(aside[0]);
+  });
+
+  it.each(['[]', '5', 'null'])(
+    'treats valid JSON that is no object (%s) as unreadable',
+    async (t) => {
+      await writeFile(join(dir, 'settings.json'), t);
+      new SettingsStore(dir).update({ theme: 'home' });
+      const aside = (await readdir(dir)).filter((f) => f.startsWith('settings.json.corrupt-'));
+      expect(aside).toHaveLength(1);
+    },
+  );
+
+  it('notices a file that breaks while the app runs', async () => {
+    const store = new SettingsStore(dir);
+    store.update({ loungeSize: 9 });
+    await writeFile(join(dir, 'settings.json'), '{ oops');
+    store.update({ theme: 'home' });
+    expect(store.get()).toMatchObject({ loungeSize: 9, theme: 'home' });
+    expect((await readdir(dir)).some((f) => f.startsWith('settings.json.corrupt-'))).toBe(true);
+  });
+
+  it('keeps invalid price entries on disk and warns about them', async () => {
+    const prices = { opus: { input: 1 }, sonnet: fullPrice };
+    await writeFile(join(dir, 'settings.json'), JSON.stringify({ prices }));
+    const store = new SettingsStore(dir);
+    expect(store.get().prices).toEqual({ sonnet: fullPrice });
+    expect(store.warning).toContain('opus');
+    store.update({ theme: 'home' });
+    expect((await readSaved())['prices']).toEqual(prices);
+    expect(store.get().prices).toEqual({ sonnet: fullPrice });
+  });
+
   it('persists updates with user-only permissions and notifies listeners', async () => {
     const store = new SettingsStore(dir);
     const seen: number[] = [];
@@ -189,6 +254,43 @@ describe('boundsVisible', () => {
     // Mostly off-screen but a usable corner is still visible.
     expect(boundsVisible({ x: 1300, y: 800, width: 800, height: 600 }, [display])).toBe(true);
     expect(boundsVisible({ x: 1400, y: 880, width: 800, height: 600 }, [display])).toBe(false);
+  });
+});
+
+describe('boundsVisible title bar', () => {
+  const display = { x: 0, y: 0, width: 1440, height: 875 };
+  it('rejects a window whose title bar is above the display', () => {
+    expect(boundsVisible({ x: 100, y: -700, width: 1280, height: 800 }, [display])).toBe(false);
+  });
+  it('accepts a title bar on a display stacked above the main one', () => {
+    const above = { x: 0, y: -900, width: 1600, height: 900 };
+    const b = { x: 100, y: -700, width: 1280, height: 800 };
+    expect(boundsVisible(b, [display, above])).toBe(true);
+  });
+});
+
+describe('clampBounds', () => {
+  const display = { x: 0, y: 25, width: 1440, height: 875 };
+  it('shrinks a window saved on a bigger monitor and moves it onto the display', () => {
+    const b = { x: 200, y: 100, width: 3000, height: 1800 };
+    expect(clampBounds(b, [display])).toEqual(display);
+  });
+  it('leaves a window that fits alone, even if part of it hangs off the edge', () => {
+    const b = { x: 1300, y: 800, width: 800, height: 600 };
+    expect(clampBounds(b, [display])).toEqual(b);
+  });
+  it('clamps to the display the window is mostly on', () => {
+    const left = { x: -800, y: 0, width: 800, height: 600 };
+    const b = { x: 50, y: 100, width: 1000, height: 1200 };
+    expect(clampBounds(b, [left, display])).toEqual({ x: 50, y: 25, width: 1000, height: 875 });
+  });
+});
+
+describe('supportsLoginItem', () => {
+  it('is false on Linux only', () => {
+    expect(supportsLoginItem('Mozilla/5.0 (X11; Linux x86_64) Electron/44.7.0')).toBe(false);
+    expect(supportsLoginItem('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')).toBe(true);
+    expect(supportsLoginItem('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')).toBe(true);
   });
 });
 
