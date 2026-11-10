@@ -115,7 +115,7 @@ describe('StatsScanner', () => {
     expect(s.version).toBe(0);
     await s.refresh();
     expect(s.records()).toHaveLength(1);
-    expect(total(s)).toBe(60); // cache reads are not counted
+    expect(total(s)).toBe(60); // this helper sums without cache reads
   });
 
   it('counts the repeated lines of one response once, keeping its growing output', async () => {
@@ -462,7 +462,7 @@ describe('Station.getStats', () => {
     expect(first.scanning).toBe(true);
     await vi.waitFor(() => expect(station!.getStats('30d').scanning).toBe(false));
     const a = station.getStats('30d');
-    expect(a.total).toBe(60);
+    expect(a.total).toBe(100);
     expect(a.sessions).toBe(1);
     // Nothing changed: the same snapshot, not a recomputation.
     expect(station.getStats('30d')).toBe(a);
@@ -498,7 +498,7 @@ describe('Station.getStats', () => {
       await station.start();
       expect(station.getStats('30d').scanning).toBe(true);
       await vi.waitFor(() => expect(station!.getStats('30d').scanning).toBe(false));
-      expect(station.getStats('30d').total).toBe(60);
+      expect(station.getStats('30d').total).toBe(100);
       await appendFile(mainPath(SA), `${usageLine({ msgId: 'msg_b', ts: NOW - MIN })}\n`);
       // Not due yet: no rescan, the cached snapshot.
       vi.setSystemTime(NOW + 30_000);
@@ -510,7 +510,7 @@ describe('Station.getStats', () => {
       expect(station.getStats('30d').scanning).toBe(false);
       expect(spy).toHaveBeenCalledTimes(1);
       spy.mockRestore();
-      await vi.waitFor(() => expect(station!.getStats('30d').total).toBe(120));
+      await vi.waitFor(() => expect(station!.getStats('30d').total).toBe(200));
       const after = station.getStats('30d');
       expect(after).not.toBe(cached);
       expect(after.scanning).toBe(false);
@@ -530,14 +530,14 @@ describe('Station.getStats', () => {
       await vi.waitFor(() => expect(station!.getStats('7d').scanning).toBe(false));
       const before = station.getStats('7d');
       expect(before.days.at(-1)?.day).toBe('2026-11-09');
-      expect(before.days.at(-1)?.tokens).toBe(60);
+      expect(before.days.at(-1)?.tokens).toBe(100);
       expect(station.getStats('7d')).toBe(before);
       // 40 s later, past midnight: no rescan is due, but "today" moved.
       vi.setSystemTime(lateEvening + 40_000);
       const after = station.getStats('7d');
       expect(after).not.toBe(before);
       expect(after.days.at(-1)?.day).toBe('2026-11-10');
-      expect(after.days.at(-2)?.tokens).toBe(60);
+      expect(after.days.at(-2)?.tokens).toBe(100);
       expect(after.currentStreak).toBe(1);
     } finally {
       vi.useRealTimers();
@@ -552,7 +552,7 @@ describe('Station.getStats', () => {
       await station.start();
       station.getStats('30d');
       await vi.waitFor(() => expect(station!.getStats('30d').scanning).toBe(false));
-      expect(station.getStats('30d').total).toBe(60);
+      expect(station.getStats('30d').total).toBe(100);
       const stop = vi.spyOn(StatsScanner.prototype, 'stop');
       vi.advanceTimersByTime(STATS_RELEASE_MS - 60_000);
       expect(stop).not.toHaveBeenCalled();
@@ -562,7 +562,7 @@ describe('Station.getStats', () => {
       // The next ask scans from scratch, and says so.
       expect(station.getStats('30d').scanning).toBe(true);
       await vi.waitFor(() => expect(station!.getStats('30d').scanning).toBe(false));
-      expect(station.getStats('30d').total).toBe(60);
+      expect(station.getStats('30d').total).toBe(100);
     } finally {
       vi.useRealTimers();
     }

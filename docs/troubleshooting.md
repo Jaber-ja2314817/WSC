@@ -78,7 +78,7 @@ Claude Code runs plugin hooks and `settings.json` hooks separately, so having bo
 
 - **Old transcripts are gone.** The Stats tab counts only the transcripts still on this machine, and Claude Code deletes old ones (`cleanupPeriodDays` in its settings, 30 days by default). **All** therefore reaches back only that far; the note at the bottom of the tab says since when. WSC keeps no history of its own, so nothing brings deleted days back.
 - **Still reading?** While _still reading history_ shows, every number can still grow. Wait for it to go away.
-- **Cache reads are not counted.** As in the live dashboard, tokens are input + output + cache write. Tools that add cache reads show far larger totals.
+- **Comparing with the Live tab.** Stats totals are input + output + cache write + cache read, the way Claude Code's `/stats` counts them. The Live tab's usage numbers leave cache reads out, so they are far smaller for the same period; the total tile also shows the figure without cache reads.
 - **Another config folder.** WSC reads `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects` when that variable is set in the environment WSC starts in. Sessions run with a different `CLAUDE_CONFIG_DIR`, or on another machine, are not included.
 - **Local days.** 7d is today and the 6 days before, 30d today and the 29 before, in your local time zone. A day only counts as active when a response landed in it.
 - **Demo mode** shows made-up history. Real stats appear once the demo gives way to real work, or after restarting without `--demo`.

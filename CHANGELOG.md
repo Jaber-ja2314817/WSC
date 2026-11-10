@@ -22,9 +22,8 @@ All notable changes to this project are documented here. The format follows
   current and longest streak, longest session, busiest day, peak hour, favourite model, an
   activity heatmap (bars for 7 days), tokens per model and per hour of day, and the top 5
   projects. The history is read from the usage lines of every transcript only when the tab is
-  first opened, deduped, and kept in memory only while the tab is in use; cache reads are not
-  counted. `npm run demo`
-  shows made-up history.
+  first opened, deduped, and kept in memory only while the tab is in use. Totals include cache
+  reads, as `/stats` does (the Live tab leaves them out). `npm run demo` shows made-up history.
 - **Live transcript watching:** `~/.claude/projects/**/*.jsonl` (or `$CLAUDE_CONFIG_DIR`) is read
   incrementally, so sessions appear and update even without hooks. Startup reads the last
   `lookbackDays` (default 7) for usage totals.

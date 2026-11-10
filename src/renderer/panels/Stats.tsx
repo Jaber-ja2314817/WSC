@@ -329,6 +329,9 @@ function Models({ snap }: { snap: StatsSnapshot }) {
               <span>
                 cache write <strong>{m.cacheWrite}</strong>
               </span>
+              <span>
+                cache read <strong>{m.cacheRead}</strong>
+              </span>
             </div>
           </li>
         ))}

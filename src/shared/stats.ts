@@ -1,7 +1,7 @@
 // Stats maths: usage statistics over a date range (Claude Code's /stats, for WSC).
 // Pure — no Electron, Node or DOM imports. One pass over deduped UsageRecords in any order;
 // see statsTypes.ts for the meaning of every field.
-import { ZERO_USAGE, tokenTotal, type TokenUsage, type UsageRecord } from './dashboardTypes';
+import { ZERO_USAGE, rawTokenTotal, type TokenUsage, type UsageRecord } from './dashboardTypes';
 import {
   STATS_IDLE_GAP_MS,
   STATS_MAX_DAYS,
@@ -203,7 +203,7 @@ export function computeStats(records: readonly UsageRecord[], opts: StatsOptions
     if (ts < from) continue;
 
     const u = r.usage;
-    const tokens = tokenTotal(u);
+    const tokens = rawTokenTotal(u);
     addInto(usage, u);
     messages++;
     byHour[hour] = (byHour[hour] ?? 0) + tokens;
@@ -284,7 +284,7 @@ export function computeStats(records: readonly UsageRecord[], opts: StatsOptions
   }
 
   const hasHistory = activeAll.size > 0;
-  const total = tokenTotal(usage);
+  const total = rawTokenTotal(usage);
 
   // Streaks over the whole history.
   const sortedDays = [...activeAll.keys()].sort((a, b) => a - b);
@@ -360,7 +360,7 @@ export function computeStats(records: readonly UsageRecord[], opts: StatsOptions
 
   const modelList: StatsModel[] = [...models]
     .map(([model, mu]) => {
-      const t = tokenTotal(mu);
+      const t = rawTokenTotal(mu);
       return { model, usage: { ...mu }, total: t, share: total > 0 ? t / total : 0 };
     })
     .sort((a, b) => b.total - a.total || cmpStr(a.model, b.model));

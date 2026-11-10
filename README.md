@@ -106,7 +106,9 @@ Days and hours are your local time. Streaks count your whole history, whatever t
 
 **Where the numbers come from.** The same usage lines as the live dashboard, but from every
 transcript still under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`), not just the last
-`lookbackDays`. Each response is counted once, and cache reads are not counted. Its limits:
+`lookbackDays`. Each response is counted once. Totals here include cache reads, the way Claude Code's `/stats`
+counts them, so they are far larger than the Live tab's numbers, which leave cache reads out; the
+total tile shows both. Its limits:
 
 - **Only what is still on this machine.** Claude Code deletes old transcripts, so **All** reaches
   back only as far as they do. The note at the bottom of the tab shows the oldest day found.

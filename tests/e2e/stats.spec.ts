@@ -145,7 +145,7 @@ test('live: the Stats tab shows real history, and follows a switch to the demo a
 
   const stats = win.locator('[data-testid="dash-stats"]');
   const projects = stats.locator('.wsc-stats-project');
-  // The synthetic history: one project, 6k tokens (cache reads are not counted anyway).
+  // The synthetic history: one project, 6k tokens (the fixture has no cache reads).
   await expect(projects).toHaveCount(1, { timeout: 10_000 });
   await expect(projects.first()).toContainText('e2e-history');
   await expect(stats.locator('[data-testid="stats-tile-total"]')).toContainText('6k');

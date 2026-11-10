@@ -1,5 +1,6 @@
 // Pure view-model helpers for the Stats view of the dashboard column (no DOM, no Preact).
 // Tested under node. Reads only StatsSnapshot fields (numbers, model ids, project names).
+import { tokenTotal } from '@shared/dashboardTypes';
 import type {
   StatsDay,
   StatsModel,
@@ -396,7 +397,7 @@ export function statsTiles(snap: StatsSnapshot): StatsTile[] {
       key: 'total',
       label: 'Total tokens',
       value: formatTokens(snap.total),
-      sub: `${plural(snap.messages, 'response')} · cache reads not counted`,
+      sub: `${plural(snap.messages, 'response')} · ${formatTokens(tokenTotal(snap.usage))} without cache reads`,
       wide: true,
     },
     { key: 'sessions', label: 'Sessions', value: String(snap.sessions) },
@@ -475,6 +476,7 @@ export interface StatsModelRow {
   input: string;
   output: string;
   cacheWrite: string;
+  cacheRead: string;
   total: string;
 }
 
@@ -487,6 +489,7 @@ export function statsModelRows(models: readonly StatsModel[]): StatsModelRow[] {
     input: formatTokens(m.usage.input),
     output: formatTokens(m.usage.output),
     cacheWrite: formatTokens(m.usage.cacheCreation),
+    cacheRead: formatTokens(m.usage.cacheRead),
     total: formatTokens(m.total),
   }));
 }
@@ -518,6 +521,7 @@ export function statsFootnote(snap: Pick<StatsSnapshot, 'firstActivityAt'>): str
     snap.firstActivityAt !== undefined ? ` (since ${formatDate(snap.firstActivityAt)})` : '';
   return (
     `Counted from the transcripts still on this machine${since}. Claude Code deletes old ` +
-    `transcripts, so “All” only reaches back that far. Cache reads are not counted.`
+    `transcripts, so “All” only reaches back that far. Totals include cache reads, which the ` +
+    `Live tab’s usage numbers leave out.`
   );
 }

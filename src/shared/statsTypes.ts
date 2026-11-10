@@ -22,7 +22,11 @@ export function isStatsRange(v: unknown): v is StatsRange {
   return v === '7d' || v === '30d' || v === 'all';
 }
 
-/** One local calendar day. "Tokens" everywhere in this file means tokenTotal(): no cache reads. */
+/**
+ * One local calendar day. "Tokens" everywhere in this file means rawTokenTotal(): input + output +
+ * cache write + cache read, the way Claude Code's /stats counts them. (The live dashboard's usage
+ * bars leave cache reads out; `usage` carries the four kinds so a view can show both.)
+ */
 export interface StatsDay {
   /** Local date, `YYYY-MM-DD`. */
   day: string;
@@ -40,7 +44,7 @@ export interface StatsDay {
 export interface StatsModel {
   model: string;
   usage: TokenUsage;
-  /** tokenTotal(usage). */
+  /** rawTokenTotal(usage). */
   total: number;
   /** Share of the range's total, 0–1. 0 when the range is empty. */
   share: number;
@@ -78,7 +82,7 @@ export interface StatsSnapshot {
   /** Oldest response on disk, whatever the range: "history since …". */
   firstActivityAt?: number;
   usage: TokenUsage;
-  /** tokenTotal(usage). */
+  /** rawTokenTotal(usage): cache reads included. */
   total: number;
   sessions: number;
   messages: number;

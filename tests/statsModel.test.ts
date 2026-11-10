@@ -478,7 +478,7 @@ describe('statsTiles', () => {
     const t = byKey(FULL);
     expect(t.total!.value).toBe('1.2M');
     expect(t.total!.wide).toBe(true);
-    expect(t.total!.sub).toBe('321 responses · cache reads not counted');
+    expect(t.total!.sub).toBe('321 responses · 1.2M without cache reads');
     expect(t.sessions!.value).toBe('14');
     expect(t.active!.value).toBe('12 / 30');
     expect(t.streak!.value).toBe('3 days');
@@ -533,7 +533,7 @@ describe('statsTiles', () => {
 });
 
 describe('model and project rows', () => {
-  it('model rows: short name, share, in / out / cache write', () => {
+  it('model rows: short name, share, in / out / cache write / cache read', () => {
     const rows = statsModelRows(FULL.models);
     expect(rows[0]).toMatchObject({
       name: 'opus-4-5',
@@ -542,6 +542,7 @@ describe('model and project rows', () => {
       input: '900',
       output: '150k',
       cacheWrite: '800k',
+      cacheRead: '5',
       total: '951k',
     });
     expect(rows[1]).toMatchObject({ name: 'haiku-4-5', pct: '<1%', cells: 1 });
@@ -561,7 +562,7 @@ describe('statsFootnote', () => {
     const text = statsFootnote(FULL);
     expect(text).toContain('since 3 Sep 2026');
     expect(text).toContain('Claude Code deletes old transcripts');
-    expect(text).toContain('Cache reads are not counted');
+    expect(text).toContain('Totals include cache reads');
   });
 
   it('without history', () => {

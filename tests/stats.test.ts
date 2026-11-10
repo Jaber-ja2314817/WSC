@@ -129,32 +129,32 @@ describe('computeStats: totals', () => {
     const ts = daysAgo(0, 9, 30);
     const s = computeStats([rec(ts, 1000, { usage: u(400, 500, 100, 9000) })], opts());
     expect(s.usage).toEqual(u(400, 500, 100, 9000));
-    expect(s.total).toBe(1000); // cache reads left out
+    expect(s.total).toBe(10000); // cache reads included
     expect(s.sessions).toBe(1);
     expect(s.messages).toBe(1);
     expect(s.activeDays).toBe(1);
     expect(s.firstActivityAt).toBe(ts);
-    expect(s.mostActiveDay).toEqual({ day: '2026-03-15', tokens: 1000 });
+    expect(s.mostActiveDay).toEqual({ day: '2026-03-15', tokens: 10000 });
     expect(s.longestSession).toEqual({
       shortId: 'sess-aaa',
       projectName: 'alpha',
       startedAt: ts,
       durationMs: 0,
     });
-    expect(s.byHour[9]).toBe(1000);
+    expect(s.byHour[9]).toBe(10000);
     expect(s.peakHour).toBe(9);
     expect(s.favoriteModel).toBe('claude-fake-1');
     expect(s.models).toEqual([
-      { model: 'claude-fake-1', usage: u(400, 500, 100, 9000), total: 1000, share: 1 },
+      { model: 'claude-fake-1', usage: u(400, 500, 100, 9000), total: 10000, share: 1 },
     ]);
     expect(s.projects).toEqual([
-      { projectId: '/home/user/alpha', projectName: 'alpha', total: 1000, sessions: 1 },
+      { projectId: '/home/user/alpha', projectName: 'alpha', total: 10000, sessions: 1 },
     ]);
     expect(s.currentStreak).toBe(1);
     expect(s.longestStreak).toBe(1);
     const today = s.days.at(-1);
-    expect(today).toMatchObject({ day: '2026-03-15', tokens: 1000, messages: 1, sessions: 1 });
-    expect(today?.byModel).toEqual({ 'claude-fake-1': 1000 });
+    expect(today).toMatchObject({ day: '2026-03-15', tokens: 10000, messages: 1, sessions: 1 });
+    expect(today?.byModel).toEqual({ 'claude-fake-1': 10000 });
   });
 
   it("splits at the range's first midnight", () => {
@@ -410,10 +410,18 @@ describe('computeStats: models and projects', () => {
     expect(s.favoriteModel).toBe('claude-fake-m');
   });
 
-  it('gives a share of 0 when the range has no tokens', () => {
+  it('counts a response that only read the cache', () => {
     const s = computeStats([rec(daysAgo(0), 0, { usage: u(0, 0, 0, 500) })], opts());
+    expect(s.total).toBe(500);
     expect(s.models).toEqual([
-      { model: 'claude-fake-1', usage: u(0, 0, 0, 500), total: 0, share: 0 },
+      { model: 'claude-fake-1', usage: u(0, 0, 0, 500), total: 500, share: 1 },
+    ]);
+  });
+
+  it('gives a share of 0 when the range has no tokens', () => {
+    const s = computeStats([rec(daysAgo(0), 0, { usage: u(0, 0, 0, 0) })], opts());
+    expect(s.models).toEqual([
+      { model: 'claude-fake-1', usage: u(0, 0, 0, 0), total: 0, share: 0 },
     ]);
   });
 
