@@ -11,6 +11,7 @@
     "playwright.config.ts",
     "src/renderer/director/**/*",
     "src/renderer/panels/dashboardModel.ts",
+    "src/renderer/panels/statsModel.ts",
     "src/renderer/scene/pacing.ts",
     "src/renderer/themes/pixelBuffer.ts",
     "src/renderer/themes/crew.ts",

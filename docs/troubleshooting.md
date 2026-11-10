@@ -74,6 +74,19 @@ Claude Code runs plugin hooks and `settings.json` hooks separately, so having bo
 - **Lost agents:** after 15 minutes of silence, a subagent is treated as finished and walks back to the lounge. This can happen if its session was closed in a way that sent no final event.
 - **Restored sessions:** these are rebuilt from transcripts when the app starts, and transcripts don't record a session ending. A finished session can therefore keep its orchestrator seat until it goes idle.
 
+## Stats look too low / start later than I expected
+
+- **Old transcripts are gone.** The Stats tab counts only the transcripts still on this machine, and Claude Code deletes old ones (`cleanupPeriodDays` in its settings, 30 days by default). **All** therefore reaches back only that far; the note at the bottom of the tab says since when. WSC keeps no history of its own, so nothing brings deleted days back.
+- **Still reading?** While _still reading history_ shows, every number can still grow. Wait for it to go away.
+- **Cache reads are not counted.** As in the live dashboard, tokens are input + output + cache write. Tools that add cache reads show far larger totals.
+- **Another config folder.** WSC reads `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects` when that variable is set in the environment WSC starts in. Sessions run with a different `CLAUDE_CONFIG_DIR`, or on another machine, are not included.
+- **Local days.** 7d is today and the 6 days before, 30d today and the 29 before, in your local time zone. A day only counts as active when a response landed in it.
+- **Demo mode** shows made-up history. Real stats appear once the demo gives way to real work, or after restarting without `--demo`.
+
+## Stats take a while the first time
+
+The first time you open the Stats tab after starting WSC, it reads the usage lines of every transcript on disk, which takes a while with a long history. Nothing is read before that, and nothing is saved afterwards, so it happens again after each restart, and when you reopen the tab after it has been closed (or the window hidden) for more than five minutes, since WSC then frees the memory the history took. The tab shows _still reading history_ and fills in as it goes; the station and the live dashboard keep working meanwhile, because the scan reads in small chunks and gives way to other work. Later opens are quick: only files that changed are read again, at most once a minute and only while the tab is open.
+
 ## The station looks blurry
 
 - WSC uses integer zoom levels for crisp pixels. Press `0` (Fit all) or zoom with `+` and `-` to snap back to a crisp level.

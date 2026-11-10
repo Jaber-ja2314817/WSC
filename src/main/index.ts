@@ -228,6 +228,7 @@ function registerIpc(): void {
       ? station.getTimeline(sessionId)
       : [],
   );
+  ipcMain.handle(IPC.getStats, (_e, range: unknown) => station?.getStats(range) ?? null);
   ipcMain.handle(IPC.getWindowMode, () => windows?.mode ?? 'normal');
   ipcMain.handle(IPC.setWindowMode, (_e, mode: unknown) => {
     if (isMode(mode) || mode === 'toggle') windows?.setMode(mode);

@@ -52,19 +52,21 @@ See `docs/architecture.md`; the Claude Code formats are documented in `docs/clau
   - `normalizer/hook.ts`, `normalizer/transcript.ts` and `normalizer/statusline.ts` are the only parsers of raw Claude Code formats.
   - Tools and privacy: `toolCategories.ts`, `redact.ts` (sanitizes every summary shown anywhere).
   - Dashboard: `dashboardTypes.ts` (contract), `usage.ts` (usage dedupe and window maths), `dashboard.ts` (`SessionLedger`).
+  - Stats: `statsTypes.ts` (contract), `stats.ts` (`computeStats`).
   - Layout: `layoutTypes.ts` (contract), `layout.ts`, `astar.ts`.
   - Other: `bubbles.ts` (rate limiter), `demoScript.ts`, `settings.ts` (zod), `themeSchema.ts` (zod), `ipc.ts` (channel names and the preload API type).
 - `src/main/` is the main process.
   - `station.ts` wires server → normalizer → store → renderer snapshots, plus backfill and demo.
   - `server.ts` (ingest, `/v1/limits` and `/v1/command`), `runtimeFile.ts`, `netGuard.ts`, `backfill.ts`, `demo.ts`.
   - `transcriptWatcher.ts` (live incremental transcript reading), `launchInfo.ts` (`launch.json` for the hook's auto-launch).
+  - `statsScan.ts` (`StatsScanner`: usage of every transcript on disk for the Stats tab, on demand, memory only).
   - `settings.ts` (settings.json and window-state.json), `appState.ts`, `windows.ts` (normal and compact), `tray.ts`, `userThemes.ts`.
 - `src/preload/` is the typed IPC bridge. The renderer is sandboxed with contextIsolation on, and its CSP forbids `unsafe-eval`. That is why `pixi.js/unsafe-eval` is imported.
 - `src/renderer/` holds:
   - `director/`: choreography, pure, tested under node. `types.ts` is the frame contract.
   - `scene/`: PixiJS `StationScene` and `Camera`.
   - `themes/`: loader, `ThemeManager`, pixel generators in `generators/`, `runtime.ts`. `types.ts` is the `ThemeRuntime` contract.
-  - `panels/`: Preact side panels, the dashboard column (`Dashboard.tsx`, pure `dashboardModel.ts`), settings, first-run and compact views.
+  - `panels/`: Preact side panels, the dashboard column (`Dashboard.tsx`, pure `dashboardModel.ts`) and its Stats tab (`Stats.tsx`, pure `statsModel.ts`), settings, first-run and compact views.
   - `src/main.ts`: the bootstrap.
 - `plugin/` is the Claude Code plugin:
   - `.claude-plugin/plugin.json`

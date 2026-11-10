@@ -10,8 +10,9 @@ import type {
   UsageStats,
 } from '@shared/dashboardTypes';
 import { tokenTotal } from '@shared/dashboardTypes';
-import type { WscApi } from '@shared/ipc';
+import type { StationStatus, WscApi } from '@shared/ipc';
 import type { Settings } from '@shared/settings';
+import { DEFAULT_STATS_RANGE, type StatsRange } from '@shared/statsTypes';
 import {
   CARD_CHIP_MAX,
   CHART_TOP_N,
@@ -45,7 +46,15 @@ import {
   usageRows,
 } from './dashboardModel';
 import { clockTime } from './model';
+import { StatsPane, type StatsMemory } from './Stats';
 import './dashboard.css';
+
+/** The dashboard column's two views. "Live" is the default. */
+export type DashTab = 'live' | 'stats';
+const DASH_TABS: readonly { id: DashTab; label: string }[] = [
+  { id: 'live', label: 'Live' },
+  { id: 'stats', label: 'Stats' },
+];
 
 export interface MountDashboardOptions {
   api?: WscApi;
@@ -513,6 +522,49 @@ function Rail(props: { dash: DashboardSnapshot | null; onExpand: () => void }) {
   );
 }
 
+/** "Live" / "Stats" switch: a tablist with roving focus and automatic activation. */
+function DashTabs(props: { tab: DashTab; onTab: (tab: DashTab) => void }) {
+  const onKey = (e: KeyboardEvent): void => {
+    const i = DASH_TABS.findIndex((t) => t.id === props.tab);
+    const n = DASH_TABS.length;
+    let next: number | undefined;
+    if (e.key === 'ArrowRight') next = (i + 1) % n;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + n) % n;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = n - 1;
+    if (next === undefined) return;
+    e.preventDefault();
+    const id = DASH_TABS[next]!.id;
+    props.onTab(id);
+    // The column re-renders synchronously, so the tab button already exists to take focus.
+    const list = e.currentTarget as HTMLElement | null;
+    list?.querySelector<HTMLElement>(`[data-tab="${id}"]`)?.focus();
+  };
+  return (
+    <div class="wsc-dash-tabs" role="tablist" aria-label="Dashboard view" onKeyDown={onKey}>
+      {DASH_TABS.map((t) => {
+        const on = t.id === props.tab;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            id={`wsc-dash-tab-${t.id}`}
+            data-tab={t.id}
+            class={`wsc-dash-tab${on ? ' is-selected' : ''}`}
+            aria-selected={on}
+            aria-controls={`wsc-dash-panel-${t.id}`}
+            tabIndex={on ? 0 : -1}
+            onClick={() => !on && props.onTab(t.id)}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function DashboardView(props: {
   api: WscApi;
   dash: DashboardSnapshot | null;
@@ -520,14 +572,21 @@ function DashboardView(props: {
   selected?: string;
   onSelect: (id: string | undefined) => void;
   onCollapse: () => void;
+  tab: DashTab;
+  onTab: (tab: DashTab) => void;
+  statsRange: StatsRange;
+  onStatsRange: (range: StatsRange) => void;
+  statsMemory: StatsMemory;
+  demo: boolean | undefined;
 }) {
   const now = useNow(5000);
-  const { dash } = props;
+  const { dash, tab } = props;
   const sel = props.selected ? dash?.sessions.find((s) => s.id === props.selected) : undefined;
   return (
     <div class="wsc-dash">
       <div class="wsc-dash-header">
         <span class="wsc-dash-title">Dashboard</span>
+        <DashTabs tab={tab} onTab={props.onTab} />
         {needsYou(dash?.sessions) && (
           <span class="wsc-dash-alert">
             <span class="wsc-dash-light wsc-bg-waiting blink" /> needs you
@@ -544,6 +603,47 @@ function DashboardView(props: {
           «
         </button>
       </div>
+      {tab === 'stats' ? (
+        <div
+          class="wsc-dash-panel"
+          role="tabpanel"
+          id="wsc-dash-panel-stats"
+          aria-labelledby="wsc-dash-tab-stats"
+        >
+          <StatsPane
+            api={props.api}
+            range={props.statsRange}
+            onRange={props.onStatsRange}
+            memory={props.statsMemory}
+            demo={props.demo}
+          />
+        </div>
+      ) : (
+        <div
+          class="wsc-dash-panel"
+          role="tabpanel"
+          id="wsc-dash-panel-live"
+          aria-labelledby="wsc-dash-tab-live"
+        >
+          <LiveView {...props} now={now} sel={sel} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LiveView(props: {
+  api: WscApi;
+  dash: DashboardSnapshot | null;
+  available: boolean;
+  selected?: string;
+  onSelect: (id: string | undefined) => void;
+  now: number;
+  sel: SessionSummary | undefined;
+}) {
+  const { dash, now, sel } = props;
+  return (
+    <>
       {!dash ? (
         <p class="wsc-dash-empty">
           {props.available ? 'Waiting for usage data…' : 'Dashboard data is not available.'}
@@ -583,7 +683,7 @@ function DashboardView(props: {
           </section>
         </>
       )}
-    </div>
+    </>
   );
 }
 
@@ -596,6 +696,23 @@ export function mountDashboard(el: HTMLElement, opts: MountDashboardOptions): Da
   let narrow = window.innerWidth < DASHBOARD_AUTO_COLLAPSE_PX;
   /** Local open/closed choice made while the window is narrow (not persisted). */
   let manual: boolean | null = null;
+  // Live/Stats tab, the Stats range and the last stats snapshot: in memory only, so they
+  // survive collapsing the column but are not saved to settings.
+  let tab: DashTab = 'live';
+  let statsRange: StatsRange = DEFAULT_STATS_RANGE;
+  const statsMemory: StatsMemory = { snap: null };
+  /** The station plays the demo (StationStatus.demo): the Stats view follows it. */
+  let demo: boolean | undefined;
+  const onTab = (next: DashTab): void => {
+    if (tab === next) return;
+    tab = next;
+    draw();
+  };
+  const onStatsRange = (next: StatsRange): void => {
+    if (statsRange === next) return;
+    statsRange = next;
+    draw();
+  };
 
   const isOpen = (): boolean => manual ?? (persistedOpen && !narrow);
 
@@ -627,6 +744,12 @@ export function mountDashboard(el: HTMLElement, opts: MountDashboardOptions): Da
           selected={selected}
           onSelect={onSelect}
           onCollapse={() => setOpen(false)}
+          tab={tab}
+          onTab={onTab}
+          statsRange={statsRange}
+          onStatsRange={onStatsRange}
+          statsMemory={statsMemory}
+          demo={demo}
         />
       ) : (
         <Rail dash={dash} onExpand={() => setOpen(true)} />
@@ -652,18 +775,30 @@ export function mountDashboard(el: HTMLElement, opts: MountDashboardOptions): Da
     void api.getDashboard().then(setDash, () => {});
     api.onDashboard?.(setDash);
   }
+  const setStatus = (s: StationStatus | null | undefined): void => {
+    if (!s || s.demo === demo) return;
+    demo = s.demo;
+    draw();
+  };
+  if (typeof api.getStatus === 'function') void api.getStatus().then(setStatus, () => {});
+  api.onStatus?.(setStatus);
   draw();
 
   return {
     select(id) {
-      if (selected === id) return;
+      // The session card lives on the Live tab: a selection from the station brings it back.
+      const toLive = id !== undefined && tab === 'stats';
+      if (selected === id && !toLive) return;
       selected = id;
+      if (toLive) tab = 'live';
       draw();
       if (id && isOpen()) {
         el.querySelector('.wsc-dash-card.is-selected')?.scrollIntoView({ block: 'nearest' });
       }
     },
     setSettings(s) {
+      // WSC's own "Reduce motion: on" also stills the column's CSS animations.
+      el.classList.toggle('wsc-reduce-motion', s.reduceMotion === 'on');
       if (s.dashboardOpen === persistedOpen) return;
       persistedOpen = s.dashboardOpen;
       if (!narrow) manual = null;

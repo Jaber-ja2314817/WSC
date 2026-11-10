@@ -1,11 +1,19 @@
 // Privacy: secrets and private details in tool inputs must never reach the snapshot (panels,
-// activity log) or the director's frame (speech bubbles, crew tool labels). Synthetic data only.
-import { describe, expect, it } from 'vitest';
+// activity log), the director's frame (speech bubbles, crew tool labels) or the Stats view's
+// history snapshot. Synthetic data only.
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Station } from '../src/main/station';
+import { StatsScanner } from '../src/main/statsScan';
 import { Director } from '../src/renderer/director/director';
 import { makePathfinder } from '../src/shared/astar';
 import { computeLayout, layoutInputFor } from '../src/shared/layout';
 import { normalizeHookPayload } from '../src/shared/normalizer/hook';
 import { normalizeTranscriptLine } from '../src/shared/normalizer/transcript';
+import { computeStats } from '../src/shared/stats';
+import { STATS_RANGES } from '../src/shared/statsTypes';
 import { StationStore } from '../src/shared/store';
 import type { StationEvent, StationSnapshot } from '../src/shared/types';
 import { CWD_A, SESSION_A, hookPayload, toolPayload } from './fixtures/hookPayloads';
@@ -252,5 +260,198 @@ describe('privacy: transcript path', () => {
     expectNoSecrets('transcript snapshot', runThroughStore(events));
     expect(events.find((e) => e.tool?.name === 'Read')?.tool?.summary).toBe('id_rsa');
     expect(events.find((e) => e.tool?.name === 'WebFetch')?.tool?.summary).toBe('x.example.org');
+  });
+});
+
+describe('privacy: stats history scan', () => {
+  // The user's name sits in the cwd (and so in the projects folder name) on purpose: only the
+  // cwd's basename may reach the snapshot.
+  const cwd = `/home/${SECRETS.username}/stats-proj`;
+  const sid = '00000000-0000-4000-8000-0000000000c1';
+  const agent = 'c0ffee00c0ffee001';
+  const at = (minutesAgo: number): string =>
+    new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  const rec = (r: Record<string, unknown>, minutesAgo: number): string =>
+    JSON.stringify({
+      timestamp: at(minutesAgo),
+      sessionId: sid,
+      cwd,
+      uuid: `u-${minutesAgo}`,
+      ...r,
+    });
+  const usage = (output: number) => ({
+    input_tokens: 10,
+    output_tokens: output,
+    cache_creation_input_tokens: 5,
+    cache_read_input_tokens: 7,
+  });
+
+  /** A session (and one subagent) whose prompt, text, tool and result lines are full of secrets. */
+  function transcripts(): { main: string[]; sub: string[] } {
+    const main = [
+      rec({ type: 'user', message: { role: 'user', content: SECRETS.prompt } }, 30),
+      rec(
+        {
+          type: 'assistant',
+          requestId: 'req_priv_1',
+          message: {
+            id: 'msg_priv_1',
+            role: 'assistant',
+            model: 'fake-model-1',
+            usage: usage(20),
+            content: [
+              { type: 'text', text: `${SECRETS.openai} ${SECRETS.prompt}` },
+              {
+                type: 'tool_use',
+                id: 'tp1',
+                name: 'Bash',
+                input: {
+                  command: `curl -u admin:${SECRETS.password} -H "Authorization: Bearer ${SECRETS.bearer}"`,
+                },
+              },
+              {
+                type: 'tool_use',
+                id: 'tp2',
+                name: 'WebFetch',
+                input: { url: `https://u:${SECRETS.urlPass}@x.example.org/?${SECRETS.query}` },
+              },
+            ],
+          },
+        },
+        29,
+      ),
+      rec(
+        {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'tp1', content: SECRETS.github },
+              { type: 'tool_result', tool_use_id: 'tp2', content: SECRETS.aws, is_error: true },
+            ],
+          },
+          toolUseResult: { stdout: SECRETS.base64 },
+        },
+        28,
+      ),
+      rec(
+        {
+          type: 'assistant',
+          requestId: 'req_priv_2',
+          message: {
+            id: 'msg_priv_2',
+            role: 'assistant',
+            model: 'fake-model-1',
+            usage: usage(30),
+            content: [
+              {
+                type: 'tool_use',
+                id: 'tp3',
+                name: 'Write',
+                input: { file_path: `/home/${SECRETS.username}/.env`, content: SECRETS.openai },
+              },
+            ],
+          },
+        },
+        27,
+      ),
+    ];
+    const sub = [
+      rec(
+        {
+          type: 'user',
+          agentId: agent,
+          isSidechain: true,
+          message: { role: 'user', content: `${SECRETS.prompt} ${SECRETS.password}` },
+        },
+        26,
+      ),
+      rec(
+        {
+          type: 'assistant',
+          agentId: agent,
+          isSidechain: true,
+          requestId: 'req_priv_3',
+          message: {
+            id: 'msg_priv_3',
+            role: 'assistant',
+            model: 'fake-model-2',
+            usage: usage(40),
+            content: [
+              { type: 'text', text: SECRETS.github },
+              {
+                type: 'tool_use',
+                id: 'tp4',
+                name: 'Grep',
+                input: {
+                  pattern: `password=${SECRETS.password}`,
+                  path: `/home/${SECRETS.username}`,
+                },
+              },
+            ],
+          },
+        },
+        25,
+      ),
+    ];
+    return { main, sub };
+  }
+
+  let root = '';
+  afterEach(async () => {
+    if (root) await rm(root, { recursive: true, force: true });
+    root = '';
+  });
+
+  async function writeHistory(): Promise<void> {
+    root = await mkdtemp(join(tmpdir(), 'wsc-priv-stats-'));
+    const projDir = join(root, cwd.replace(/\//g, '-'));
+    const subDir = join(projDir, sid, 'subagents');
+    await mkdir(subDir, { recursive: true });
+    const { main, sub } = transcripts();
+    await writeFile(join(projDir, `${sid}.jsonl`), main.map((l) => `${l}\n`).join(''));
+    await writeFile(join(subDir, `agent-${agent}.jsonl`), sub.map((l) => `${l}\n`).join(''));
+  }
+
+  it('the scanned records and every range of the snapshot carry no secrets', async () => {
+    await writeHistory();
+    const scanner = new StatsScanner({ root });
+    await scanner.refresh();
+    scanner.stop();
+    const records = scanner.records();
+    // The scan really read both files: 3 responses, two models.
+    expect(records.length).toBe(3);
+    expectNoSecrets('stats records', records);
+    const now = Date.now();
+    for (const range of STATS_RANGES) {
+      const snap = computeStats(records, { now, range });
+      expect(snap.messages).toBe(3);
+      expect(snap.projects.map((p) => p.projectName)).toEqual(['stats-proj']);
+      expectNoSecrets(`stats snapshot (${range})`, snap);
+    }
+  });
+
+  it('Station.getStats (the IPC answer) carries no secrets', async () => {
+    await writeHistory();
+    const station = new Station({
+      version: 'test',
+      offline: true,
+      watchTranscripts: true,
+      liveWatch: false,
+      projectsDir: root,
+      onSnapshot: () => undefined,
+    });
+    try {
+      await station.start();
+      station.getStats('all');
+      await vi.waitFor(() => expect(station.getStats('all').scanning).toBe(false));
+      for (const range of STATS_RANGES) {
+        const snap = station.getStats(range);
+        expect(snap.messages).toBe(3);
+        expectNoSecrets(`station stats (${range})`, snap);
+      }
+    } finally {
+      await station.stop();
+    }
   });
 });

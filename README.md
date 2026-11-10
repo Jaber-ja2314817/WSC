@@ -63,7 +63,8 @@ hook knows where the app is.
 
 The left column of the window is a live dashboard that shares its data with the station, so the
 two never disagree. Collapse it to a slim rail with `«`; clicking a session card selects that
-session's orchestrator on the station, and clicking a crew member selects its session here.
+session's orchestrator on the station, and clicking a crew member selects its session here. Two
+tabs sit in its header: **Live** (below) and [**Stats**](#stats).
 
 - **Usage window:** tokens used in the current window across **all** sessions, time until it
   resets, burn rate (tokens/min over the last 10 min), the projected total at reset, and the
@@ -87,6 +88,36 @@ estimate. The transcripts don't contain your plan's real allowance, so there is 
 until you set your own limits (`windowTokenLimit`, `weeklyTokenLimit`); then the bars turn
 amber at 75 % and red at 90 %. The exact remaining quota is only shown by Claude Code's own
 `/usage` command.
+
+### Stats
+
+The **Stats** tab is a look back over your history, in the spirit of Claude Code's `/stats`. Pick
+**7d** (today and the 6 days before), **30d** (the default) or **All**:
+
+- **Tiles:** total tokens and responses, sessions, active days, current and longest streak,
+  longest session (active time; pauses over 30 minutes don't count), busiest day, peak hour,
+  favourite model, and an estimated cost when `prices` covers every model in the range.
+- **Activity:** tokens per day, as bars for 7d and as a calendar heatmap for 30d and All (the
+  most recent 53 weeks).
+- **Models** by share of tokens, **tokens per hour of day**, and the **top 5 projects**.
+
+Days and hours are your local time. Streaks count your whole history, whatever the range; under
+7d and 30d their tiles say _all history_.
+
+**Where the numbers come from.** The same usage lines as the live dashboard, but from every
+transcript still under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`), not just the last
+`lookbackDays`. Each response is counted once, and cache reads are not counted. Its limits:
+
+- **Only what is still on this machine.** Claude Code deletes old transcripts, so **All** reaches
+  back only as far as they do. The note at the bottom of the tab shows the oldest day found.
+- **Nothing is read until you open the tab.** The first open reads the whole history, and the
+  numbers grow while _still reading history_ shows. After that only changed files are read again,
+  quietly, at most once a minute and only while the tab is open.
+- **Nothing is stored.** WSC keeps the numbers in memory and writes none of them to disk. Five
+  minutes after you close the tab (or hide the window) it lets go of them, and the next open, or
+  a restart, reads the history again.
+- Demo mode shows made-up history and reads no transcripts. The tab switches to it, or back to
+  your own history, as soon as the demo starts or ends.
 
 ### Settings
 

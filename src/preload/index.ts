@@ -13,6 +13,7 @@ import {
 } from '@shared/ipc';
 import type { DashboardSnapshot, TimelineStep } from '@shared/dashboardTypes';
 import type { Settings } from '@shared/settings';
+import type { StatsSnapshot } from '@shared/statsTypes';
 import type { StationSnapshot } from '@shared/types';
 
 function listen<T>(channel: string, cb: (value: T) => void): () => void {
@@ -49,6 +50,7 @@ const api: WscApi = {
   onDashboard: (cb) => listen<DashboardSnapshot>(IPC.dashboard, cb),
   getTimeline: (sessionId) =>
     ipcRenderer.invoke(IPC.getTimeline, sessionId) as Promise<TimelineStep[]>,
+  getStats: (range) => ipcRenderer.invoke(IPC.getStats, range) as Promise<StatsSnapshot | null>,
   setVisible: (visible) => ipcRenderer.send(IPC.visibility, visible === true),
   rendererReady: () => ipcRenderer.send(IPC.rendererReady),
 };

@@ -133,7 +133,7 @@ export function classifyTranscriptPath(root: string, path: string): FileWhere | 
   return null;
 }
 
-async function safeReaddir(dir: string): Promise<string[]> {
+export async function safeReaddir(dir: string): Promise<string[]> {
   try {
     return await readdir(dir);
   } catch {
@@ -141,7 +141,7 @@ async function safeReaddir(dir: string): Promise<string[]> {
   }
 }
 
-interface FileStat {
+export interface FileStat {
   ino: number;
   size: number;
   mtimeMs: number;
@@ -150,7 +150,7 @@ interface FileStat {
   isDir: boolean;
 }
 
-async function safeStat(path: string): Promise<FileStat | null> {
+export async function safeStat(path: string): Promise<FileStat | null> {
   try {
     const s = await stat(path);
     return {
@@ -173,7 +173,7 @@ async function readJson(path: string): Promise<unknown> {
   }
 }
 
-const yieldToLoop = (): Promise<void> => new Promise((r) => setImmediate(r));
+export const yieldToLoop = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 export class TranscriptWatcher {
   private readonly root: string;

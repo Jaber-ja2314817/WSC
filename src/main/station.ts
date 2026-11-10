@@ -1,5 +1,6 @@
 // Main-process wiring: ingest server + backfill + transcript watcher → normalizer → store →
-// renderer snapshots, plus the dashboard ledger (token usage, timelines) → dashboard snapshots.
+// renderer snapshots, plus the dashboard ledger (token usage, timelines) → dashboard snapshots,
+// and the Stats view's history scan (pulled on demand, never pushed).
 import { randomBytes } from 'node:crypto';
 import { SessionLedger } from '@shared/dashboard';
 import type {
@@ -10,13 +11,21 @@ import type {
   TimelineStep,
 } from '@shared/dashboardTypes';
 import { hookSessionInfo, normalizeHookPayload, normalizeRateLimits } from '@shared/normalizer';
+import { computeStats } from '@shared/stats';
+import {
+  DEFAULT_STATS_RANGE,
+  isStatsRange,
+  type StatsRange,
+  type StatsSnapshot,
+} from '@shared/statsTypes';
 import { mergePlanLimits, samePlanLimits } from '@shared/usage';
 import { StationStore } from '@shared/store';
 import type { StationEvent, StationSnapshot, ToolCategory } from '@shared/types';
 import { backfillRecent, backfillTranscript } from './backfill';
-import { DemoPlayer, demoPlanLimits, demoUsageExtras } from './demo';
+import { DemoPlayer, demoPlanLimits, demoStats, demoUsageExtras } from './demo';
 import { readRuntimeFile, removeRuntimeFile, writeRuntimeFile } from './runtimeFile';
 import { startIngestServer, type IngestServer, type StationCommand } from './server';
+import { StatsScanner } from './statsScan';
 import { TranscriptWatcher, type WatcherBatch } from './transcriptWatcher';
 
 export const DEFAULT_PORT = 47821;
@@ -31,6 +40,14 @@ const DAY_MS = 24 * 60 * 60_000;
 /** Live transcript events older than this only reach the dashboard, never the station floor. */
 const LIVE_STORE_HORIZON_MS = 30 * 60_000;
 const TIMELINE_LIMIT = 300;
+/** The Stats view's history rescan: at most this often, and only while it is being polled. */
+const STATS_RESCAN_MS = 60_000;
+/**
+ * The Stats view polls about once a minute while shown. Asked nothing for this long, the
+ * history scanner and its records are dropped, so closing the view frees the memory.
+ */
+export const STATS_RELEASE_MS = 5 * 60_000;
+const STATS_RELEASE_CHECK_MS = 60_000;
 /** The dashboard's weekly total needs this much, whatever the startup scan's horizon. */
 const MIN_RETENTION_MS = 7 * DAY_MS;
 /** The demo loops with fresh ids forever, and nothing needs its history. */
@@ -76,9 +93,12 @@ export interface StationOptions {
   onSessionStart?: () => void;
   /** Initial tunables (settings); change later with `configure`. */
   tuning?: StationTuning;
-  /** Watch transcripts (default: when not offline and not a pinned demo). */
+  /**
+   * Watch transcripts (default: when not offline and not a pinned demo). Also decides whether
+   * the Stats view may scan history (default: when not offline).
+   */
   watchTranscripts?: boolean;
-  /** Transcript root override (tests). Defaults to claudeProjectsDir(). */
+  /** Transcript root override (tests). Defaults to claudeProjectsDir(). Stats scan it too. */
   projectsDir?: string;
   /** false: no fs.watch / rescan timer; call pollTranscripts() (tests). */
   liveWatch?: boolean;
@@ -131,6 +151,20 @@ export class Station {
   /** Real plan usage from the status line bridge. */
   private planLimits: PlanLimits | undefined;
   private demoStartedAt = Date.now();
+  /** Stats view history scan, created on the first getStats() in live mode. */
+  private statsScanner: StatsScanner | null = null;
+  /** stop() ran: no new stats scan. */
+  private stopped = false;
+  /** When the last stats scan ended (0: none yet). */
+  private statsScannedAt = 0;
+  /** The scanner's first full scan has ended: later rescans run without `scanning`. */
+  private statsFirstScanDone = false;
+  /** When getStats() was last called (live), so an unused scanner can be released. */
+  private statsAskedAt = 0;
+  /** Checks for an unused scanner while one exists. */
+  private statsReleaseTimer: NodeJS.Timeout | null = null;
+  /** Last live stats snapshot per range, with what it was computed from. */
+  private readonly statsCache = new Map<StatsRange, { key: string; snap: StatsSnapshot }>();
 
   private tuning: StationTuning = {};
   /** While paused, events are still ingested but no snapshots are pushed. */
@@ -189,6 +223,7 @@ export class Station {
   /** Apply settings changes. Tool mapping/summary changes affect events from now on. */
   configure(t: StationTuning): void {
     this.tuning = { ...this.tuning, ...t };
+    this.statsCache.clear(); // prices may have changed
     this.store.setTimings({
       ...(this.tuning.staleMs !== undefined ? { staleMs: this.tuning.staleMs } : {}),
       ...(this.tuning.sessionLingerMs !== undefined
@@ -291,6 +326,72 @@ export class Station {
     return this.activeLedger().timeline(sessionId, TIMELINE_LIMIT);
   }
 
+  /**
+   * Usage statistics for a range (invalid → DEFAULT_STATS_RANGE). Live: starts a history scan
+   * on the first call (and a quiet rescan at most once a minute after that) without waiting
+   * for it; the snapshot says `scanning` until the first scan ends. Cached per range while
+   * nothing changed. A scanner nobody asked for in STATS_RELEASE_MS is dropped with its
+   * records. Demo: synthetic stats, and no transcript is read.
+   */
+  getStats(range: unknown): StatsSnapshot {
+    const r: StatsRange = isStatsRange(range) ? range : DEFAULT_STATS_RANGE;
+    const now = Date.now();
+    if (this.currentMode !== 'live') return demoStats(now, r);
+    const prices = this.tuning.prices;
+    const priced = prices && Object.keys(prices).length > 0 ? { prices } : {};
+    const scanner = this.statsEnabled() ? this.ensureStatsScan(now) : null;
+    const version = scanner?.version ?? 0;
+    // Only the first scan can leave numbers missing; a rescan just adds what is new.
+    const scanning = (scanner?.scanning ?? false) && !this.statsFirstScanDone;
+    const key = `${version}|${scanning ? 1 : 0}|${localDay(now)}`;
+    const cached = this.statsCache.get(r);
+    if (cached && cached.key === key) return cached.snap;
+    const snap = computeStats(scanner?.records() ?? [], { now, range: r, scanning, ...priced });
+    this.statsCache.set(r, { key, snap });
+    return snap;
+  }
+
+  /** Offline (tests) scans history only when transcripts are watched, like the watcher. */
+  private statsEnabled(): boolean {
+    return !this.stopped && (this.opts.watchTranscripts ?? !this.opts.offline);
+  }
+
+  private ensureStatsScan(now: number): StatsScanner {
+    this.statsAskedAt = now;
+    if (!this.statsScanner) {
+      this.statsScanner = new StatsScanner(
+        this.opts.projectsDir !== undefined ? { root: this.opts.projectsDir } : {},
+      );
+      this.statsReleaseTimer = setInterval(() => {
+        if (Date.now() - this.statsAskedAt >= STATS_RELEASE_MS) this.releaseStats();
+      }, STATS_RELEASE_CHECK_MS);
+      this.statsReleaseTimer.unref?.();
+    }
+    const scanner = this.statsScanner;
+    const due = this.statsScannedAt === 0 || now - this.statsScannedAt >= STATS_RESCAN_MS;
+    if (!scanner.scanning && due) {
+      // Mark it now, so polls during a scan that ends at once do not start another.
+      this.statsScannedAt = now;
+      void scanner.refresh().then(() => {
+        if (this.statsScanner !== scanner) return;
+        this.statsScannedAt = Date.now();
+        this.statsFirstScanDone = true;
+      });
+    }
+    return scanner;
+  }
+
+  /** Drop the history scanner and everything it holds; the next getStats() starts afresh. */
+  private releaseStats(): void {
+    if (this.statsReleaseTimer) clearInterval(this.statsReleaseTimer);
+    this.statsReleaseTimer = null;
+    this.statsScanner?.stop();
+    this.statsScanner = null;
+    this.statsScannedAt = 0;
+    this.statsFirstScanDone = false;
+    this.statsCache.clear();
+  }
+
   /** Read appended transcript bytes now (tests; the live watcher does this on its own). */
   async pollTranscripts(): Promise<void> {
     await this.watcher?.poll();
@@ -356,6 +457,8 @@ export class Station {
     this.demo = null;
     this.watcher?.close();
     this.watcher = null;
+    this.stopped = true;
+    this.releaseStats();
     removeRuntimeFile();
     await this.server?.close();
     this.server = null;
@@ -529,4 +632,10 @@ export class Station {
       ...(this.tuning.fullToolDetails ? { fullToolDetails: true } : {}),
     };
   }
+}
+
+/** Local calendar day of `ts`, as a cache key (stats days are local days). */
+function localDay(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }

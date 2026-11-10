@@ -1,6 +1,7 @@
 // IPC channel names and the API the preload exposes to the renderer.
 import type { DashboardSnapshot, TimelineStep } from './dashboardTypes';
 import type { Settings } from './settings';
+import type { StatsRange, StatsSnapshot } from './statsTypes';
 import type { StationSnapshot } from './types';
 
 export const IPC = {
@@ -30,6 +31,7 @@ export const IPC = {
   dashboard: 'wsc:dashboard',
   getDashboard: 'wsc:get-dashboard',
   getTimeline: 'wsc:get-timeline',
+  getStats: 'wsc:get-stats',
   visibility: 'wsc:visibility',
   rendererReady: 'wsc:renderer-ready',
 } as const;
@@ -123,6 +125,12 @@ export interface WscApi {
   onDashboard(cb: (dash: DashboardSnapshot) => void): () => void;
   /** Newest first, capped at 300 steps. Empty for unknown sessions. */
   getTimeline(sessionId: string): Promise<TimelineStep[]>;
+  /**
+   * Usage statistics for a date range. The first call starts a scan of every transcript on
+   * disk; until it ends the result has `scanning: true` and the caller polls again. Null when
+   * stats are unavailable. Pull only: main never pushes stats.
+   */
+  getStats(range: StatsRange): Promise<StatsSnapshot | null>;
   /** Renderer → main: the window became visible/hidden. Hidden: main pushes nothing. */
   setVisible(visible: boolean): void;
   /** Renderer → main: `onCommand` is listening, send what was held back. */
