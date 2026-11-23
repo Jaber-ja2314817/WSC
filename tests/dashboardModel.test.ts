@@ -30,6 +30,9 @@ import {
   hourLabel,
 } from '../src/renderer/panels/dashboardModel';
 
+/** The machine's own time zone, to restore after tests that change TZ. */
+const HOST_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 const HOUR = 3_600_000;
 
 describe('formatTokens', () => {
@@ -254,8 +257,11 @@ describe('hourLabel', () => {
     try {
       fn();
     } finally {
-      if (prev === undefined) delete process.env['TZ'];
-      else process.env['TZ'] = prev;
+      // Windows keeps the last zone after a delete; set the host's zone back first.
+      if (prev === undefined) {
+        process.env['TZ'] = HOST_TZ;
+        delete process.env['TZ'];
+      } else process.env['TZ'] = prev;
     }
   };
   const UTC_HOUR = Date.UTC(2026, 0, 15, 9);

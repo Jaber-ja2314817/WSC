@@ -121,7 +121,10 @@ describe('forward.mjs', () => {
     const probe = createServer();
     const port = await listen(probe);
     await new Promise((r) => probe.close(r));
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     const r = await run(BODY);
     expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
     expect(r.ms).toBeLessThan(300 + STARTUP_SLACK_MS);
@@ -138,7 +141,10 @@ describe('forward.mjs', () => {
       });
     });
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 'secret', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 'secret', pid: process.pid, version: '0' }),
+    );
     try {
       const r = await run(BODY);
       expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
@@ -153,7 +159,10 @@ describe('forward.mjs', () => {
       /* never respond */
     });
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     try {
       const r = await run(BODY);
       expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
@@ -169,7 +178,10 @@ describe('forward.mjs', () => {
       /* never respond */
     });
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     const exitFile = join(dir, 'exit-uptime.txt');
     try {
       const r = await run(BODY, {}, [slowBootPreload(exitFile)]);
@@ -196,7 +208,10 @@ describe('forward.mjs', () => {
       req.on('end', () => res.writeHead(204).end());
     });
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 'secret', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 'secret', pid: process.pid, version: '0' }),
+    );
     try {
       const r = await run(BODY, proxyEnv(proxyPort));
       expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
@@ -221,7 +236,10 @@ describe('forward.mjs', () => {
       server.listen(6667, '127.0.0.1', () => r(true));
     });
     if (!bound) return;
-    writeFileSync(runtimeFile, JSON.stringify({ port: 6667, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port: 6667, token: 't', pid: process.pid, version: '0' }),
+    );
     try {
       expect(await run(BODY)).toMatchObject({ code: 0, stdout: '', stderr: '' });
       expect(got).toEqual(['/v1/events']);
@@ -377,7 +395,10 @@ describe('forward.mjs auto-launch', () => {
   it('does not launch when the app is running', async () => {
     const server = createServer((_req, res) => res.writeHead(204).end());
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     try {
       silent(await run(SESSION_START, launchEnv));
       await notLaunched();
@@ -401,7 +422,10 @@ describe('forward.mjs auto-launch', () => {
   it.each([401, 403, 404])('launches when a foreign server on the port says %i', async (status) => {
     const server = createServer((_req, res) => res.writeHead(status).end());
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     try {
       silent(await run(SESSION_START, launchEnv));
       expect((await launchedArgs())[0]).toBe('--from-hook');
@@ -425,7 +449,10 @@ describe('forward.mjs auto-launch', () => {
   it('does not launch when the app answers with a server error', async () => {
     const server = createServer((_req, res) => res.writeHead(500).end());
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     try {
       silent(await run(SESSION_START, launchEnv));
       await notLaunched();

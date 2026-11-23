@@ -122,7 +122,10 @@ async function recorder(): Promise<{ server: Server; got: Got[] }> {
     });
   });
   const port = await listen(server);
-  writeFileSync(runtimeFile, JSON.stringify({ port, token: 'secret', pid: 1, version: '0' }));
+  writeFileSync(
+    runtimeFile,
+    JSON.stringify({ port, token: 'secret', pid: process.pid, version: '0' }),
+  );
   return { server, got };
 }
 
@@ -197,7 +200,10 @@ describe('statusline.mjs', () => {
     const probe = createServer();
     const port = await listen(probe);
     await new Promise((r) => probe.close(r));
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     const r = await run(INPUT);
     expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
     expect(r.ms).toBeLessThan(300 + STARTUP_SLACK_MS);
@@ -208,7 +214,10 @@ describe('statusline.mjs', () => {
       /* never respond */
     });
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     try {
       const r = await run(INPUT);
       expect(r).toMatchObject({ code: 0, stdout: '', stderr: '' });
@@ -224,7 +233,10 @@ describe('statusline.mjs', () => {
       /* never respond */
     });
     const port = await listen(server);
-    writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+    writeFileSync(
+      runtimeFile,
+      JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+    );
     const exitFile = join(dir, 'exit-uptime.txt');
     try {
       const r = await run(INPUT, [], {}, [slowBootPreload(exitFile)]);
@@ -309,7 +321,10 @@ describe('statusline.mjs', () => {
         /* never respond */
       });
       const port = await listen(server);
-      writeFileSync(runtimeFile, JSON.stringify({ port, token: 't', pid: 1, version: '0' }));
+      writeFileSync(
+        runtimeFile,
+        JSON.stringify({ port, token: 't', pid: process.pid, version: '0' }),
+      );
       try {
         const r = await run(INPUT, thenEcho(ECHO_STDIN));
         expect(r).toMatchObject({ code: 0, stderr: '', stdout: `[Model X] ${INPUT.length}` });

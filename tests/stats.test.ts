@@ -9,6 +9,9 @@ import {
   type StatsOptions,
 } from '../src/shared/statsTypes';
 
+/** The machine's own time zone, to restore after tests that change TZ. */
+const HOST_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 // Local wall-clock timestamps, so every test passes in any time zone.
 const at = (y: number, m: number, d: number, h = 12, min = 0): number =>
   new Date(y, m, d, h, min).getTime();
@@ -544,8 +547,11 @@ describe('computeStats: daylight saving', () => {
     process.env['TZ'] = 'America/New_York';
   });
   afterAll(() => {
-    if (saved === undefined) delete process.env['TZ'];
-    else process.env['TZ'] = saved;
+    // Windows keeps the last zone after a delete; set the host's zone back first.
+    if (saved === undefined) {
+      process.env['TZ'] = HOST_TZ;
+      delete process.env['TZ'];
+    } else process.env['TZ'] = saved;
   });
 
   it('steps by calendar day across a 23-hour day', () => {
@@ -595,8 +601,11 @@ describe('computeStats: clock changes that are not on the hour', () => {
     saved = process.env['TZ'];
   });
   afterAll(() => {
-    if (saved === undefined) delete process.env['TZ'];
-    else process.env['TZ'] = saved;
+    // Windows keeps the last zone after a delete; set the host's zone back first.
+    if (saved === undefined) {
+      process.env['TZ'] = HOST_TZ;
+      delete process.env['TZ'];
+    } else process.env['TZ'] = saved;
   });
 
   /** byHour the slow way: one Date per record. */
