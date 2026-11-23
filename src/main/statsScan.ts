@@ -201,7 +201,7 @@ export class StatsScanner {
         ...(cwd ? { cwd } : {}),
         // A resumed session's file repeats the original's history: the older file keeps the
         // credit (UsageRecord.rank). Without a creation time, the mtime is close enough.
-        usageRank: st.birthtimeMs || st.mtimeMs,
+        usageRank: st.birthtimeMs ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs,
       },
     };
     this.files.set(path, state);

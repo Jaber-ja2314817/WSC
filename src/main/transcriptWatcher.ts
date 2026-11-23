@@ -326,8 +326,10 @@ export class TranscriptWatcher {
         agentId: where.agentId,
         toolNames: new Map(),
         // A resumed session's file repeats the original's history: the older file keeps its
-        // usage (UsageRecord.rank). No creation time on this file system: the mtime is close.
-        usageRank: st.birthtimeMs || st.mtimeMs,
+        // usage (UsageRecord.rank). Rank by the earlier of creation and modification time:
+        // some file systems have no creation time, Linux stamps files made within a few ms
+        // alike, and a copy that kept its times is older than its creation.
+        usageRank: st.birthtimeMs ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs,
       },
       spawned: false,
       finished: false,
