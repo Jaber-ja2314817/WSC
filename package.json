@@ -1,7 +1,7 @@
 {
   "name": "wsc",
   "productName": "WSC",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Work Space Claude — a live 2D pixel-art station for watching Claude Code agents work",
   "main": "./out/main/index.js",
   "author": "WSC contributors",

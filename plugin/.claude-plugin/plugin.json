@@ -1,7 +1,7 @@
 {
   "name": "wsc",
   "displayName": "WSC",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Work Space Claude \u2014 watch your Claude Code agents work as a live 2D pixel-art crew. Watch-only, local-only, zero cost.",
   "author": {
     "name": "WSC contributors"
