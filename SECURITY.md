@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please **do not open a public issue** for security problems. Report them privately via GitHub's **Security → Report a vulnerability** on https://github.com/OWNER/wsc. Include the WSC version, OS and Claude Code version, plus steps to reproduce. We aim to acknowledge reports within a week.
+Please **do not open a public issue** for security problems. Report them privately via GitHub's **Security → Report a vulnerability** on https://github.com/Jaber-ja2314817/WSC. Include the WSC version, OS and Claude Code version, plus steps to reproduce. We aim to acknowledge reports within a week.
 
 Only the latest release is supported with security fixes.
 

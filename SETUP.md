@@ -17,7 +17,7 @@ WSC costs nothing to run. It never calls a model API, never sends prompts, and n
 In any Claude Code session, run:
 
 ```
-/plugin marketplace add OWNER/wsc
+/plugin marketplace add Jaber-ja2314817/WSC
 /plugin install wsc@wsc
 ```
 
@@ -30,7 +30,7 @@ The plugin adds two things:
 
 ## 3. Download and install the app
 
-Download the latest release from **https://github.com/OWNER/wsc/releases**.
+Download the latest release from **https://github.com/Jaber-ja2314817/WSC/releases**.
 
 | OS      | File                                                                                 |
 | ------- | ------------------------------------------------------------------------------------ |
@@ -119,7 +119,7 @@ If you don't use plugins, add the hooks yourself.
 **From a checkout, the quick way:** `npm run hooks:install` merges them into `~/.claude/settings.json` for you (backup first, idempotent, existing hooks kept); `npm run hooks:uninstall` removes only WSC's entries. It refuses while the `wsc@wsc` plugin is enabled, since both copies of each hook would fire. By hand:
 
 1. Get the files.
-   - Clone the repo: `git clone https://github.com/OWNER/wsc`
+   - Clone the repo: `git clone https://github.com/Jaber-ja2314817/WSC`
    - Or use the copy inside the app:
      - macOS: `/Applications/WSC.app/Contents/Resources/plugin`
      - Windows: `%LOCALAPPDATA%\Programs\WSC\resources\plugin`
@@ -403,7 +403,7 @@ WSC writes nothing else to your machine. It never modifies Claude Code's transcr
 ## Run from source
 
 ```sh
-git clone https://github.com/OWNER/wsc && cd wsc
+git clone https://github.com/Jaber-ja2314817/WSC && cd WSC
 npm install
 npm run build
 claude --plugin-dir ./plugin   # or install the plugin from the local marketplace: /plugin marketplace add ./

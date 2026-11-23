@@ -157,7 +157,7 @@ describe('launch.mjs with the app not running', () => {
 
   it('prints the download link when the app cannot be found', async () => {
     const r = await run([], notRunning());
-    expect(oneLine(r)).toContain('https://github.com/OWNER/wsc/releases');
+    expect(oneLine(r)).toContain('https://github.com/Jaber-ja2314817/WSC/releases');
     expect(r.ms).toBeLessThan(2_000);
   });
 

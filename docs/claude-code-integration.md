@@ -169,8 +169,8 @@ How the plugin is located and loaded:
 
 Install steps:
 
-- `/plugin marketplace add OWNER/wsc`, then `/plugin install wsc@wsc`.
-- From a shell: `claude plugin marketplace add OWNER/wsc && claude plugin install wsc@wsc`.
+- `/plugin marketplace add Jaber-ja2314817/WSC`, then `/plugin install wsc@wsc`.
+- From a shell: `claude plugin marketplace add Jaber-ja2314817/WSC && claude plugin install wsc@wsc`.
 
 Local development: `claude --plugin-dir ./plugin`. After editing, run `/reload-plugins`.
 

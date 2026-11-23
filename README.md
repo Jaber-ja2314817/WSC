@@ -21,11 +21,11 @@ Two projects at once? Each gets its own zone, and a new one unfolds the moment y
 ## Quick install
 
 ```
-/plugin marketplace add OWNER/wsc
+/plugin marketplace add Jaber-ja2314817/WSC
 /plugin install wsc@wsc
 ```
 
-Then download the app for macOS, Windows or Linux from [Releases](https://github.com/OWNER/wsc/releases) and type `/station` in Claude Code.
+Then download the app for macOS, Windows or Linux from [Releases](https://github.com/Jaber-ja2314817/WSC/releases) and type `/station` in Claude Code.
 
 **→ Full step-by-step guide: [SETUP.md](SETUP.md)** It covers unsigned-app warnings, manual hook install without the plugin, and uninstalling.
 

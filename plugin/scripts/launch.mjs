@@ -9,7 +9,7 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readLaunchInfo, readRuntime } from './runtime-path.mjs';
 
-const RELEASES_URL = 'https://github.com/OWNER/wsc/releases';
+const RELEASES_URL = 'https://github.com/Jaber-ja2314817/WSC/releases';
 const THEME_RE = /^[a-z0-9][a-z0-9_-]{0,40}$/i;
 
 function say(line) {

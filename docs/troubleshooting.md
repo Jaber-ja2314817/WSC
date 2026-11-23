@@ -123,4 +123,4 @@ No. Every hook runs asynchronously, so Claude Code never waits for it, except `S
 
 ## Still stuck?
 
-Open a [bug report](https://github.com/OWNER/wsc/issues/new/choose). Include your OS, the WSC version and the Claude Code version. Don't paste real transcripts or tokens; demo-mode screenshots are ideal.
+Open a [bug report](https://github.com/Jaber-ja2314817/WSC/issues/new/choose). Include your OS, the WSC version and the Claude Code version. Don't paste real transcripts or tokens; demo-mode screenshots are ideal.

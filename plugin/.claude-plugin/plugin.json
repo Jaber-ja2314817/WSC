@@ -6,8 +6,8 @@
   "author": {
     "name": "WSC contributors"
   },
-  "homepage": "https://github.com/OWNER/wsc",
-  "repository": "https://github.com/OWNER/wsc",
+  "homepage": "https://github.com/Jaber-ja2314817/WSC",
+  "repository": "https://github.com/Jaber-ja2314817/WSC",
   "license": "MIT",
   "keywords": ["visualization", "subagents", "pixel-art", "hooks", "station"]
 }

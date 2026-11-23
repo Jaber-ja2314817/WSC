@@ -9,7 +9,7 @@ Thanks for helping! Bug fixes, features, docs and themes are all welcome. Please
 Requirements: Node.js 20.19+ (CI uses 24) and git. Claude Code is only needed to test hooks live.
 
 ```sh
-git clone https://github.com/OWNER/wsc && cd wsc
+git clone https://github.com/Jaber-ja2314817/WSC && cd WSC
 npm install
 npm run dev     # app with hot reload, live mode
 npm run demo    # app playing the scripted two-project demo (ignores real hooks)

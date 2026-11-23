@@ -6,7 +6,7 @@ WSC is an Electron desktop app that shows Claude Code agents as a 2D pixel-art c
 - Idle crew wait in the lounge.
 - Subagents walk out to the zone for their project, which is grouped by working directory.
 
-It is fed by an async hook plugin and by transcript backfill. Repo: `OWNER/wsc`. License: MIT.
+It is fed by an async hook plugin and by transcript backfill. Repo: `Jaber-ja2314817/WSC`. License: MIT.
 
 ## Non-negotiables
 

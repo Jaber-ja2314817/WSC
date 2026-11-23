@@ -51,6 +51,6 @@ linux:
 
 publish:
   provider: github
-  owner: OWNER
-  repo: wsc
+  owner: Jaber-ja2314817
+  repo: WSC
   releaseType: draft

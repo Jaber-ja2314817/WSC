@@ -24,7 +24,7 @@ Examples of unacceptable behavior:
 
 Maintainers may remove, edit or reject comments, commits, code, issues and other contributions that don't follow this Code of Conduct. They may also temporarily or permanently ban contributors for behavior they deem harmful.
 
-Report unacceptable behavior privately to the maintainers via GitHub (https://github.com/OWNER/wsc). All reports will be reviewed promptly and confidentially.
+Report unacceptable behavior privately to the maintainers via GitHub (https://github.com/Jaber-ja2314817/WSC). All reports will be reviewed promptly and confidentially.
 
 ## Attribution
 
